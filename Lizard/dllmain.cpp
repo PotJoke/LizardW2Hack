@@ -37,8 +37,39 @@ static void CreateConsole() {
     AllocConsole();
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
     g_console = GetStdHandle(STD_OUTPUT_HANDLE);
     if (g_console) SetConsoleTextAttribute(g_console, g_colorInfo);
+}
+
+static void PrintBanner() {
+    static const char* kLogo = u8R"(⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⢹⣿⣿⣿⣿⣧⠀⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣧⢀⣣⣇⡄⠀⠀⠀⠀⠀⠀⠀⠰⣰⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⣀⣨⣷⣿⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣹⣿⣿⣿⣿⣿⣿⣦⣤⣀⣀⣀⣀⣀⣿⣿⣿⡿⠷⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣶⣤⡀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⢀⣐⣒⣾⣿⠟⠈⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⣠⢚⡽⢻⠁⠀⣀⣀⣈⠙⠻⠿⢿⣿⣿⠿⣿⣿⣿⠿⠛⠉⠉⠛⢿⣿⣿⣧⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⡞⠉⠀⠉⠻⣦⡀⠀⣀⣠⢄⣻⣿⣧⠀⠀⠀⠀⠀⠀⣿⣿⣿⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢧⡀⠀⠀⠀⠘⢿⣄⠤⠴⢿⣿⠿⠿⠀⠀⠀⠀⠀⢀⣿⣿⡿⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠁⠀⠀⠀⠀⠻⢷⣦⣅⡀⠀⠀⠀⠀⠀⢀⣤⣾⣿⡿⠁⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠻⠿⣿⣿⣿⣿⣿⣿⡿⠟⠋⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+)";
+
+    PrintColor(g_colorOffset, "%s\n", kLogo);
+    PrintColor(g_colorOk, "=== LizardW2Hack ===\n");
+    PrintColor(g_colorInfo, "Author: PotJoke\n");
+    PrintColor(g_colorWarn, "Starting in 5 seconds...\n\n");
+    Sleep(5000);
 }
 
 static void Init() {
@@ -108,7 +139,7 @@ bool __stdcall isEnoughMoney(DWORD* __this, DWORD* price, DWORD* showAlert, DWOR
 
 static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
     Init();
-    PrintColor(g_colorOk, "Greetings from PotJoke\n");
+    PrintBanner();
     PrintColor(g_colorInfo, "Ready to serve master!\n");
     PrintColor(g_colorWarn, "Please do NOT close console\n");
     ResolvePathsRelativeToGameAssembly();
