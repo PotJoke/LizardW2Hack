@@ -1,21 +1,20 @@
 ﻿#include "pch.h"
 
-#include <Windows.h>
 #include <MinHook.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <unordered_set>
 
-uintptr_t base = (uintptr_t)GetModuleHandle(NULL);
 uintptr_t GameAssembly = (uintptr_t)GetModuleHandle("GameAssembly.dll");
-uintptr_t GetStoryMode = 0x0; //GameController$$GetStoryModeEnabled
-uintptr_t StoryMode = 0x0; //CustomStoryFunctions$$StoryModeEnabled
-uintptr_t OneScene = 0x0; //Controllers.StoryStateUtilities$$CheckOneOfScenariosUnlocked
-uintptr_t SetScene = 0x0; //FStoryModel$$CheckSetOfScenariosUnlocked
-uintptr_t SceneOpen = 0x0; //Player$$isSceneOpened
-uintptr_t LevelCleared = 0x0; //YMatchThree.Core.LevelGameplay$$IsLevelComplete
-uintptr_t CheckPrice = 0x0; //GameController$$checkCoins
+uintptr_t GetStoryMode = 0x0;
+uintptr_t StoryMode = 0x0;
+uintptr_t OneScene = 0x0;
+uintptr_t SetScene = 0x0;
+uintptr_t SceneOpen = 0x0;
+uintptr_t LevelCleared = 0x0;
+uintptr_t CheckPrice = 0x0;
 
 HANDLE g_console = nullptr;
 WORD g_colorInfo = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_RED | FOREGROUND_INTENSITY;
@@ -34,8 +33,7 @@ void PrintColor(WORD color, const char* fmt, ...) {
     if (g_console) SetConsoleTextAttribute(g_console, g_colorInfo);
 }
 
-//I will make button to hide this
-void CreateConsole() {
+static void CreateConsole() {
     AllocConsole();
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
@@ -43,7 +41,7 @@ void CreateConsole() {
     if (g_console) SetConsoleTextAttribute(g_console, g_colorInfo);
 }
 
-void init() {
+static void Init() {
     MH_Initialize();
     CreateConsole();
 }
@@ -80,7 +78,6 @@ bool __stdcall getStoryModeEnabled(DWORD* __this, DWORD* method) {
 
 bool(__fastcall* StoryModeEnabled_o)(DWORD*);
 bool __stdcall StoryModeEnabled(DWORD* method) {
-    printf("StoryModeEnabled called\n");
     return false;
 }
 
@@ -109,18 +106,17 @@ bool __stdcall isEnoughMoney(DWORD* __this, DWORD* price, DWORD* showAlert, DWOR
     return true;
 }
 
-void main() {
-    init();
+static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
+    Init();
     PrintColor(g_colorOk, "Greetings from PotJoke\n");
     PrintColor(g_colorInfo, "Ready to serve master!\n");
-    PrintColor(g_colorWarn, "Please don't close console\n");
+    PrintColor(g_colorWarn, "Please do NOT close console\n");
     ResolvePathsRelativeToGameAssembly();
     PrintColor(g_colorInfo, "[Resolver] global-metadata path: %s\n", g_globalMetadataPath.c_str());
     PrintColor(g_colorInfo, "[Resolver] GameAssembly path: %s\n", g_gameAssemblyPath.c_str());
     PrintColor(g_colorInfo, "[Resolver] methodPointers RVA cache/current: 0x%p\n", (void*)g_methodPointersRva);
 
     auto resolveAndApply = [](const char* fullName, const char* namespase, const char* className, const char* methodName, int paramCount, uintptr_t& target) {
-        // Accept both "Namespace.Class" and split "namespace + class" formats from dumps.
         const char* effectiveNs = namespase;
         const char* effectiveClass = className;
         std::string classBuffer;
@@ -148,29 +144,25 @@ void main() {
     resolveAndApply("YMatchThree.Core.LevelGameplay$$IsLevelComplete", "YMatchThree.Core", "LevelGameplay", "IsLevelComplete", 0, LevelCleared);
     resolveAndApply("GameController$$checkCoins", "", "GameController", "checkCoins", 3, CheckPrice);
 
-    //CreateHookWithResolvedOffset("GameController$$GetStoryModeEnabled", GetStoryMode, (LPVOID)&getStoryModeEnabled, (LPVOID*)&getStoryModeEnabled_o);
-    //CreateHookWithResolvedOffset("CustomStoryFunctions$$StoryModeEnabled", StoryMode, (LPVOID)&StoryModeEnabled, (LPVOID*)&StoryModeEnabled_o);
-    //CreateHookWithResolvedOffset("Controllers.StoryStateUtilities$$CheckOneOfScenariosUnlocked", OneScene, (LPVOID)&CheckScenariosUnlocked, (LPVOID*)&CheckOneOfScenariosUnlocked_o);
-    //CreateHookWithResolvedOffset("FStoryModel$$CheckSetOfScenariosUnlocked", SetScene, (LPVOID)&CheckScenariosUnlocked, (LPVOID*)&CheckSetOfScenariosUnlocked_o);
-    //CreateHookWithResolvedOffset("Player$$isSceneOpened", SceneOpen, (LPVOID)&isSceneOpened, (LPVOID*)&isSceneOpened_o);
-    //CreateHookWithResolvedOffset("YMatchThree.Core.LevelGameplay$$IsLevelComplete", LevelCleared, (LPVOID)&isLevelCleared, (LPVOID*)&isLevelCleared_o);
-    //CreateHookWithResolvedOffset("GameController$$checkCoins", CheckPrice, (LPVOID)&isEnoughMoney, (LPVOID*)&isEnoughMoney_o);
+    CreateHookWithResolvedOffset("GameController$$GetStoryModeEnabled", GetStoryMode, (LPVOID)&getStoryModeEnabled, (LPVOID*)&getStoryModeEnabled_o);
+    CreateHookWithResolvedOffset("CustomStoryFunctions$$StoryModeEnabled", StoryMode, (LPVOID)&StoryModeEnabled, (LPVOID*)&StoryModeEnabled_o);
+    CreateHookWithResolvedOffset("Controllers.StoryStateUtilities$$CheckOneOfScenariosUnlocked", OneScene, (LPVOID)&CheckScenariosUnlocked, (LPVOID*)&CheckOneOfScenariosUnlocked_o);
+    CreateHookWithResolvedOffset("FStoryModel$$CheckSetOfScenariosUnlocked", SetScene, (LPVOID)&CheckScenariosUnlocked, (LPVOID*)&CheckSetOfScenariosUnlocked_o);
+    CreateHookWithResolvedOffset("Player$$isSceneOpened", SceneOpen, (LPVOID)&isSceneOpened, (LPVOID*)&isSceneOpened_o);
+    CreateHookWithResolvedOffset("YMatchThree.Core.LevelGameplay$$IsLevelComplete", LevelCleared, (LPVOID)&isLevelCleared, (LPVOID*)&isLevelCleared_o);
+    CreateHookWithResolvedOffset("GameController$$checkCoins", CheckPrice, (LPVOID)&isEnoughMoney, (LPVOID*)&isEnoughMoney_o);
 
     MH_EnableHook(MH_ALL_HOOKS);
+    return 0;
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule,
-    DWORD  ul_reason_for_call,
-    LPVOID lpReserved
-)
-{
-    switch (ul_reason_for_call)
-    {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
+    switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
-        CreateThread(0, 0, (PTHREAD_START_ROUTINE)main, hModule, 0, 0);
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-    case DLL_PROCESS_DETACH:
+        DisableThreadLibraryCalls(hModule);
+        CreateThread(nullptr, 0, ThreadMain, nullptr, 0, nullptr);
+        break;
+    default:
         break;
     }
     return TRUE;

@@ -362,16 +362,4 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Lizard
-Lizard/Lizard.vcxproj.user
-Lizard/Lizard.vcxproj.filters
-Lizard/Lizard.vcxproj.user
-Lizard/ipch/
-Lizard/x64/
-Lizard/x86/
-Lizard/Debug/
-Lizard/Release/
-Lizard/Lizard.sln.DotSettings.user
-Lizard/Lizard.sln.DotSettings.user
-Il2CppDumper/
-bepinex/
+Release/ 

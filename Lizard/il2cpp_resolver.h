@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <regex>
 #include <string>
 #include <vector>
 
@@ -14,17 +13,6 @@ static std::string g_gameAssemblyPath = "";
 static uintptr_t g_methodPointersRva = 0x0;
 static bool g_pathsResolved = false;
 static bool g_pathsResolveTried = false;
-
-struct Il2CppGlobalMetadataHeader;
-
-static uint64_t GetImageBase(const std::vector<uint8_t>& pe);
-static const char* MetadataString(const std::vector<uint8_t>& metadata, const Il2CppGlobalMetadataHeader& header, int32_t index);
-static uint32_t RvaToFileOffset(const std::vector<uint8_t>& pe, uint32_t rva);
-static bool AutoDetectMethodPointersRva(
-    const std::vector<uint8_t>& metadataBytes,
-    const std::vector<uint8_t>& gameAssemblyBytes,
-    uintptr_t& outRva
-);
 
 typedef void* (*il2cpp_domain_get_t)();
 typedef void (*il2cpp_domain_get_assemblies_t)(void* domain, const void*** assemblies, size_t* size);
@@ -235,6 +223,45 @@ struct Il2CppImageDefinitionV24 {
     uint32_t customAttributeCount;
 };
 #pragma pack(pop)
+
+static uint64_t GetImageBase(const std::vector<uint8_t>& pe) {
+    if (pe.size() < sizeof(IMAGE_DOS_HEADER)) return 0;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)pe.data();
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > pe.size()) return 0;
+    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(pe.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    return nt->OptionalHeader.ImageBase;
+}
+
+static const char* MetadataString(const std::vector<uint8_t>& metadata, const Il2CppGlobalMetadataHeader& header, int32_t index) {
+    if (index < 0) return "";
+    uint64_t pos = (uint64_t)header.stringOffset + (uint64_t)index;
+    if (pos >= metadata.size()) return "";
+    return (const char*)(metadata.data() + pos);
+}
+
+static uint32_t RvaToFileOffset(const std::vector<uint8_t>& pe, uint32_t rva) {
+    if (pe.size() < sizeof(IMAGE_DOS_HEADER)) return 0;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)pe.data();
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > pe.size()) return 0;
+
+    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(pe.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+    for (uint16_t i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        uint32_t va = sections[i].VirtualAddress;
+        uint32_t vs = sections[i].Misc.VirtualSize;
+        uint32_t raw = sections[i].PointerToRawData;
+        uint32_t rawSize = sections[i].SizeOfRawData;
+        uint32_t maxSize = (vs > rawSize) ? vs : rawSize;
+        if (rva >= va && rva < va + maxSize) return raw + (rva - va);
+    }
+
+    return 0;
+}
 
 static bool UseV24MetadataLayout(int32_t version) {
     return version <= 24;
@@ -904,55 +931,6 @@ static bool ResolvePathsRelativeToGameAssembly() {
     printf("[Resolver] Failed to resolve global-metadata.dat relative to GameAssembly.\n");
     g_pathsResolved = false;
     return false;
-}
-
-static uintptr_t NormalizeMethodAddressToOffset(uint64_t methodAddress, const std::vector<uint8_t>& gameAssemblyBytes) {
-    if (methodAddress == 0) return 0;
-    uint64_t imageBase = GetImageBase(gameAssemblyBytes);
-    if (imageBase != 0 && methodAddress > imageBase) {
-        return (uintptr_t)(methodAddress - imageBase); // VA -> RVA
-    }
-    return (uintptr_t)methodAddress; // Already RVA
-}
-
-
-static const char* MetadataString(const std::vector<uint8_t>& metadata, const Il2CppGlobalMetadataHeader& header, int32_t index) {
-    if (index < 0) return "";
-    uint64_t pos = (uint64_t)header.stringOffset + (uint64_t)index;
-    if (pos >= metadata.size()) return "";
-    return (const char*)(metadata.data() + pos);
-}
-
-static uint32_t RvaToFileOffset(const std::vector<uint8_t>& pe, uint32_t rva) {
-    if (pe.size() < sizeof(IMAGE_DOS_HEADER)) return 0;
-    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)pe.data();
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-    if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > pe.size()) return 0;
-
-    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(pe.data() + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-
-    const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
-    for (uint16_t i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        uint32_t va = sections[i].VirtualAddress;
-        uint32_t vs = sections[i].Misc.VirtualSize;
-        uint32_t raw = sections[i].PointerToRawData;
-        uint32_t rawSize = sections[i].SizeOfRawData;
-        uint32_t maxSize = (vs > rawSize) ? vs : rawSize;
-        if (rva >= va && rva < va + maxSize) return raw + (rva - va);
-    }
-
-    return 0;
-}
-
-static uint64_t GetImageBase(const std::vector<uint8_t>& pe) {
-    if (pe.size() < sizeof(IMAGE_DOS_HEADER)) return 0;
-    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)pe.data();
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-    if ((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > pe.size()) return 0;
-    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(pe.data() + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-    return nt->OptionalHeader.ImageBase;
 }
 
 static bool IsExecutableVa(uint64_t va, uint64_t imageBase, const std::vector<PeSectionRange>& sections) {

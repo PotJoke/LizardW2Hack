@@ -5,6 +5,8 @@ VisualStudioVersion = 17.14.36623.8 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Lizard", "Lizard\Lizard.vcxproj", "{10FA4D61-E856-4B17-A04A-215061BC7281}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DoorstopBootstrap", "DoorstopBootstrap\DoorstopBootstrap.csproj", "{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -21,6 +23,14 @@ Global
 		{10FA4D61-E856-4B17-A04A-215061BC7281}.Release|x64.Build.0 = Release|x64
 		{10FA4D61-E856-4B17-A04A-215061BC7281}.Release|x86.ActiveCfg = Release|Win32
 		{10FA4D61-E856-4B17-A04A-215061BC7281}.Release|x86.Build.0 = Release|Win32
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Debug|x64.Build.0 = Debug|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Debug|x86.Build.0 = Debug|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Release|x64.ActiveCfg = Release|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Release|x64.Build.0 = Release|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Release|x86.ActiveCfg = Release|Any CPU
+		{822DCCA9-E6D4-4B26-BE29-A6F0C1F5C2D9}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
