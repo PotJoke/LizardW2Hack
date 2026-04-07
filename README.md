@@ -1,17 +1,44 @@
-# Description
+# LizardW2Hack
 
-DLL file prepared to be injeceted with something like process Hacker 2 into HumansAreNotThatAgainstLizardwomen2
-Now it's unlocks every scene and enables StoryMode
+Проект для модификации Unity il2cpp игр.
+В частности для Humans Are Not That Against LizardWoman 2
 
-# How is that works
+## Как это работает
 
-Essentially, a minhook intercepts the program's address and uses calculated offsets (which were searched by pattern in memory) then waits for an event. When this happens, the minhook receives its parameters, stops execution, and immediately starts a new one with the same parameters but a different output. I believe this is called overriding.
+DLL файл предназначен для инъекции в процесс игры с помощью инструментов вроде Process Hacker 2. Использует MinHook для перехвата адресов программы, рассчитывает оффсеты с помощью паттернов в памяти, затем ожидает события. При наступлении события MinHook получает параметры, останавливает выполнение и запускает новую версию с измененными параметрами (переопределение).
 
-# How to build
+## Сборка из командной строки
 
-You'll need Visual Studio
+### Зависимости
 
-Install git, then vcpkg and install minhook using it with this command:
-```
-.\vcpkg install minhook:x64-windows-static
-```
+- Visual Studio (для MSBuild)
+- Git
+- vcpkg
+
+### Установка зависимостей
+
+1. Установите vcpkg:
+   ```
+   git clone https://github.com/Microsoft/vcpkg.git
+   cd vcpkg
+   .\bootstrap-vcpkg.bat
+   .\vcpkg integrate install
+   ```
+
+2. Установите minhook:
+   ```
+   .\vcpkg install minhook:x64-windows-static
+   ```
+
+### Сборка
+
+Сборка C++ DLL:
+   ```
+   "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" Lizard.sln /p:Configuration=Release /p:Platform=x64
+   ```
+
+   *Примечание: Если Visual Studio установлена в другом месте, найдите путь к MSBuild.exe или используйте Developer Command Prompt for Visual Studio, где MSBuild доступен по умолчанию.*
+
+### Использование
+
+Инъектируйте полученную DLL в процесс игры.
