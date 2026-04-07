@@ -1,0 +1,55 @@
+GameController$$GetStoryModeEnabled(DWORD* __this, DWORD* method) {
+    name "Story Mode (GameController)";
+    enabled false;
+    param 0;
+    printf("getStoryModeEnabled called\n");
+    return false;
+}
+
+CustomStoryFunctions$$StoryModeEnabled(DWORD* method) {
+    name "Story Mode (CustomStoryFunctions)";
+    enabled false;
+    param 0;
+    printf("StoryModeEnabled called\n");
+    return false;
+}
+
+Controllers.StoryStateUtilities$$CheckOneOfScenariosUnlocked(DWORD* __this, DWORD* scenes, DWORD* method) {
+    name "Unlock One Scenario";
+    enabled true;
+    param 1;
+    printf("CheckScenariosUnlocked called\n");
+    return true;
+}
+
+FStoryModel$$CheckSetOfScenariosUnlocked(DWORD* __this, DWORD* scenes, DWORD* method) {
+    name "Unlock Set Of Scenarios";
+    enabled true;
+    param 1;
+    printf("CheckScenariosUnlocked called\n");
+    return true;
+}
+
+Player$$isSceneOpened(DWORD* __this, DWORD* novelId, DWORD* scenario, DWORD* method) {
+    name "Open Any Scene";
+    enabled true;
+    param 2;
+    printf("isSceneOpened called\n");
+    return true;
+}
+
+YMatchThree.Core.LevelGameplay$$IsLevelComplete(DWORD* __this, DWORD* method) {
+    name "Auto Win Level";
+    enabled true;
+    param 0;
+    printf("isLevelCompleted called\n");
+    return true;
+}
+
+GameController$$checkCoins(DWORD* __this, DWORD* price, DWORD* showAlert, DWORD* callback, DWORD* method) {
+    name "Infinite Coins";
+    enabled true;
+    param 3;
+    printf("isEnoughMoney called\n");
+    return true;
+}
