@@ -171,7 +171,13 @@ static void DrawLogsPanel(int scroll) {
     }
 }
 
-static void DrawExplorerPanel(const std::string& query, const std::vector<std::string>& results, int resultScroll, const std::string& status) {
+static std::string ExplorerEllipsizeAscii(const std::string& s, size_t maxChars) {
+    if (s.size() <= maxChars) return s;
+    if (maxChars <= 3) return s.substr(0, maxChars);
+    return s.substr(0, maxChars - 3) + "...";
+}
+
+static void DrawExplorerPanel(const std::string& query, const std::vector<ExplorerMethodHit>& results, int resultScroll, const std::string& status) {
     ClearConsoleScreen();
     LizardLogf(g_colorOk, "LizardW2Hack by PotJoke\n");
     PrintTabBar(MainTab::Explorer);
@@ -183,16 +189,33 @@ static void DrawExplorerPanel(const std::string& query, const std::vector<std::s
 
     short rows, cols;
     GetConsoleSize(rows, cols);
-    int visible = (int)rows - 14;
-    if (visible < 4) visible = 4;
+    // Two console lines per hit (name row + params/RVA row).
+    int visible = ((int)rows - 14) / 2;
+    if (visible < 3) visible = 3;
     int maxScroll = (int)results.size() > visible ? (int)results.size() - visible : 0;
     int rscroll = resultScroll;
     if (rscroll > maxScroll) rscroll = maxScroll;
     if (rscroll < 0) rscroll = 0;
 
     LizardLogf(g_colorOffset, "--- %zu matches (offset %d) ---\n", results.size(), rscroll);
+
+    const WORD colorRet = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    const WORD colorName = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    const WORD colorParams = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+
     for (int i = rscroll; i < (int)results.size() && i < rscroll + visible; ++i) {
-        LizardLogf(g_colorInfo, "%s\n", results[(size_t)i].c_str());
+        const ExplorerMethodHit& h = results[(size_t)i];
+        std::string retCol = ExplorerEllipsizeAscii(h.returnType, 28);
+        std::string nameCol = ExplorerEllipsizeAscii(h.qualifiedMethod, 72);
+        LizardLogf(colorRet, "%s  ", retCol.c_str());
+        LizardLogf(colorName, "%s\n", nameCol.c_str());
+        LizardLogf(g_colorInfo, "  ");
+        LizardLogf(colorParams, "%s", h.paramList.c_str());
+        if (!h.rvaText.empty()) {
+            LizardLogf(g_colorInfo, "  ");
+            LizardLogf(g_colorOffset, "%s", h.rvaText.c_str());
+        }
+        LizardLogf(g_colorInfo, "\n");
     }
 }
 
@@ -261,7 +284,7 @@ static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
     int selected = 0;
     int logScroll = 0;
     std::string explorerQuery;
-    std::vector<std::string> explorerResults;
+    std::vector<ExplorerMethodHit> explorerResults;
     int explorerScroll = 0;
     std::string explorerStatus;
 
@@ -353,8 +376,8 @@ static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
                 int k = _getch();
                 short rows, cols;
                 GetConsoleSize(rows, cols);
-                int visible = (int)rows - 14;
-                if (visible < 4) visible = 4;
+                int visible = ((int)rows - 14) / 2;
+                if (visible < 3) visible = 3;
                 int maxScroll = (int)explorerResults.size() > visible ? (int)explorerResults.size() - visible : 0;
                 if (k == 72) {
                     explorerScroll--;

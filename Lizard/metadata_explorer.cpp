@@ -4,7 +4,7 @@
 bool RunMetadataMethodSearch(
     const std::string& needle,
     int maxResults,
-    std::vector<std::string>& outLines,
+    std::vector<ExplorerMethodHit>& outLines,
     std::string* errorMessage
 ) {
     auto fail = [&](const char* msg) -> bool {
@@ -31,7 +31,11 @@ bool RunMetadataMethodSearch(
         return fail("global-metadata.dat is empty or too small.");
     }
 
-    if (!SearchMetadataMethodsForSubstring(metadata, needle.c_str(), maxResults, outLines)) {
+    std::vector<uint8_t> gameAssembly;
+    if (!g_gameAssemblyPath.empty())
+        ReadAllBytes(g_gameAssemblyPath, gameAssembly);
+
+    if (!SearchMetadataMethodsForExplorer(metadata, gameAssembly, needle.c_str(), maxResults, outLines)) {
         return fail("Metadata parse failed (bad sanity/version or size mismatch). File may be encrypted or from an unsupported Unity layout.");
     }
 

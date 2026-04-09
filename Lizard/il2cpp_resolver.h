@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -225,6 +226,20 @@ struct Il2CppImageDefinitionV24 {
     int32_t customAttributeStart;
     uint32_t customAttributeCount;
 };
+
+// Il2CppDumper: customAttributeIndex only for metadata version <= 24.
+struct Il2CppParameterDefinitionV24 {
+    uint32_t nameIndex;
+    uint32_t token;
+    int32_t customAttributeIndex;
+    int32_t typeIndex;
+};
+
+struct Il2CppParameterDefinitionV25Plus {
+    uint32_t nameIndex;
+    uint32_t token;
+    int32_t typeIndex;
+};
 #pragma pack(pop)
 
 static uint64_t GetImageBase(const std::vector<uint8_t>& pe) {
@@ -327,6 +342,410 @@ static uint16_t MethodDefParamCount(const uint8_t* p, int32_t version) {
     if (UseV31MethodLayout(version)) return ((const Il2CppMethodDefinitionV31*)p)->parameterCount;
     if (UseV24MetadataLayout(version)) return ((const Il2CppMethodDefinitionV24*)p)->parameterCount;
     return ((const Il2CppMethodDefinitionV27Plus*)p)->parameterCount;
+}
+
+static int32_t MethodDefParameterStart(const uint8_t* p, int32_t version) {
+    if (UseV31MethodLayout(version)) return ((const Il2CppMethodDefinitionV31*)p)->parameterStart;
+    if (UseV24MetadataLayout(version)) return ((const Il2CppMethodDefinitionV24*)p)->parameterStart;
+    return ((const Il2CppMethodDefinitionV27Plus*)p)->parameterStart;
+}
+
+static uint16_t MethodDefFlags(const uint8_t* p, int32_t version) {
+    if (UseV31MethodLayout(version)) return ((const Il2CppMethodDefinitionV31*)p)->flags;
+    if (UseV24MetadataLayout(version)) return ((const Il2CppMethodDefinitionV24*)p)->flags;
+    return ((const Il2CppMethodDefinitionV27Plus*)p)->flags;
+}
+
+static size_t ParameterDefSizeForVersion(int32_t version) {
+    return UseV24MetadataLayout(version) ? sizeof(Il2CppParameterDefinitionV24) : sizeof(Il2CppParameterDefinitionV25Plus);
+}
+
+static const uint8_t* GetParameterDefAt(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    int32_t parameterIndex
+) {
+    if (parameterIndex < 0) return nullptr;
+    size_t ps = ParameterDefSizeForVersion(version);
+    if (header.parametersCount <= 0 || (uint64_t)header.parametersOffset + (uint64_t)header.parametersCount > metadata.size())
+        return nullptr;
+    int32_t paramSlots = header.parametersCount / (int32_t)ps;
+    if (parameterIndex >= paramSlots) return nullptr;
+    uint64_t pos = (uint64_t)header.parametersOffset + (uint64_t)parameterIndex * ps;
+    if (pos + ps > metadata.size()) return nullptr;
+    return metadata.data() + pos;
+}
+
+static uint32_t ParameterDefNameIndex(const uint8_t* p, int32_t version) {
+    if (UseV24MetadataLayout(version)) return ((const Il2CppParameterDefinitionV24*)p)->nameIndex;
+    return ((const Il2CppParameterDefinitionV25Plus*)p)->nameIndex;
+}
+
+static std::string SanitizeHookParamIdentifier(const char* raw, int fallbackIndex) {
+    char buf[32];
+    if (!raw || !raw[0]) {
+        snprintf(buf, sizeof(buf), "p%d", fallbackIndex);
+        return std::string(buf);
+    }
+    std::string out;
+    out.reserve(strlen(raw));
+    for (const unsigned char* s = (const unsigned char*)raw; *s; ++s) {
+        unsigned char c = *s;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+            out.push_back((char)c);
+        else
+            out.push_back('_');
+    }
+    while (!out.empty() && out[0] == '_') out.erase(out.begin());
+    if (out.empty() || (out[0] >= '0' && out[0] <= '9')) {
+        snprintf(buf, sizeof(buf), "p%d", fallbackIndex);
+        return std::string(buf);
+    }
+    return out;
+}
+
+// Il2CPP hook-style list: optional __this, DWORD* per metadata param, trailing DWORD* method (MethodInfo*).
+static std::string BuildHookStyleParamListFromMethodDef(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    const uint8_t* m
+) {
+    const uint16_t METHOD_ATTRIBUTE_STATIC = 0x0010;
+    bool isStatic = (MethodDefFlags(m, version) & METHOD_ATTRIBUTE_STATIC) != 0;
+    uint16_t pc = MethodDefParamCount(m, version);
+    int32_t pstart = MethodDefParameterStart(m, version);
+
+    std::string s = "(";
+    bool first = true;
+    auto appendPart = [&](const std::string& part) {
+        if (!first) s += ", ";
+        s += part;
+        first = false;
+    };
+
+    if (!isStatic)
+        appendPart("DWORD* __this");
+
+    bool paramsOk = (pstart >= 0);
+    if (paramsOk) {
+        for (uint16_t i = 0; i < pc; ++i) {
+            const uint8_t* pd = GetParameterDefAt(metadata, header, version, pstart + (int32_t)i);
+            if (!pd) {
+                paramsOk = false;
+                break;
+            }
+            uint32_t ni = ParameterDefNameIndex(pd, version);
+            const char* pname = MetadataString(metadata, header, (int32_t)ni);
+            std::string id = SanitizeHookParamIdentifier(pname, (int)i);
+            if (id == "method")
+                id = "methodArg";
+            appendPart("DWORD* " + id);
+        }
+    }
+    if (!paramsOk) {
+        s = "(";
+        first = true;
+        if (!isStatic) {
+            appendPart("DWORD* __this");
+        }
+        for (uint16_t i = 0; i < pc; ++i) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "p%u", (unsigned)i);
+            appendPart(std::string("DWORD* ") + buf);
+        }
+    }
+
+    appendPart("DWORD* method");
+    s += ")";
+    return s;
+}
+
+static int32_t TypeDefByvalTypeIndex(const uint8_t* p, int32_t version) {
+    if (UseV24MetadataLayout(version)) return ((const Il2CppTypeDefinitionV24*)p)->byvalTypeIndex;
+    return ((const Il2CppTypeDefinitionV27Plus*)p)->byvalTypeIndex;
+}
+
+static int32_t MethodDefReturnTypeIndex(const uint8_t* m, int32_t version) {
+    if (UseV31MethodLayout(version)) return ((const Il2CppMethodDefinitionV31*)m)->returnType;
+    if (UseV24MetadataLayout(version)) return ((const Il2CppMethodDefinitionV24*)m)->returnType;
+    return ((const Il2CppMethodDefinitionV27Plus*)m)->returnType;
+}
+
+static int32_t ParameterDefTypeIndex(const uint8_t* p, int32_t version) {
+    if (UseV24MetadataLayout(version)) return ((const Il2CppParameterDefinitionV24*)p)->typeIndex;
+    return ((const Il2CppParameterDefinitionV25Plus*)p)->typeIndex;
+}
+
+// Il2Cpp corlib type codes (subset).
+enum Il2CppMetadataTypeKind : uint8_t {
+    IL2CPP_TYPE_END = 0x00,
+    IL2CPP_TYPE_VOID = 0x01,
+    IL2CPP_TYPE_BOOLEAN = 0x02,
+    IL2CPP_TYPE_CHAR = 0x03,
+    IL2CPP_TYPE_I1 = 0x04,
+    IL2CPP_TYPE_U1 = 0x05,
+    IL2CPP_TYPE_I2 = 0x06,
+    IL2CPP_TYPE_U2 = 0x07,
+    IL2CPP_TYPE_I4 = 0x08,
+    IL2CPP_TYPE_U4 = 0x09,
+    IL2CPP_TYPE_I8 = 0x0a,
+    IL2CPP_TYPE_U8 = 0x0b,
+    IL2CPP_TYPE_R4 = 0x0c,
+    IL2CPP_TYPE_R8 = 0x0d,
+    IL2CPP_TYPE_STRING = 0x0e,
+    IL2CPP_TYPE_PTR = 0x0f,
+    IL2CPP_TYPE_BYREF = 0x10,
+    IL2CPP_TYPE_VALUETYPE = 0x11,
+    IL2CPP_TYPE_CLASS = 0x12,
+    IL2CPP_TYPE_VAR = 0x13,
+    IL2CPP_TYPE_ARRAY = 0x14,
+    IL2CPP_TYPE_GENERICINST = 0x15,
+    IL2CPP_TYPE_TYPEDBYREF = 0x16,
+    IL2CPP_TYPE_I = 0x18,
+    IL2CPP_TYPE_U = 0x19,
+    IL2CPP_TYPE_FNPTR = 0x1b,
+    IL2CPP_TYPE_OBJECT = 0x1c,
+    IL2CPP_TYPE_SZARRAY = 0x1d,
+    IL2CPP_TYPE_MVAR = 0x1e,
+    IL2CPP_TYPE_INTERNAL = 0x21,
+};
+
+static std::string QualifiedTypeDefinitionName(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    int32_t typeDefIndex
+) {
+    const uint8_t* td = GetTypeDefAt(metadata, header, version, typeDefIndex);
+    if (!td) return "?";
+    const char* cn = MetadataString(metadata, header, (int32_t)TypeDefNameIndex(td, version));
+    const char* ns = MetadataString(metadata, header, (int32_t)TypeDefNamespaceIndex(td, version));
+    if (!cn) cn = "";
+    if (!ns) ns = "";
+    if (ns[0]) return std::string(ns) + "." + cn;
+    return std::string(cn);
+}
+
+static void ReadIl2CppMetadataTypeRaw(
+    const std::vector<uint8_t>& metadata,
+    uint32_t tableOff,
+    int32_t typeIndex,
+    uint32_t& outDatapoint,
+    uint32_t& outBits,
+    uint8_t& outKind
+) {
+    outDatapoint = 0;
+    outBits = 0;
+    outKind = IL2CPP_TYPE_END;
+    if (typeIndex < 0) return;
+    uint64_t pos = (uint64_t)tableOff + (uint64_t)typeIndex * 8u;
+    if (pos + 8 > metadata.size()) return;
+    const uint8_t* p = metadata.data() + pos;
+    outDatapoint = *(const uint32_t*)p;
+    outBits = *(const uint32_t*)(p + 4);
+    outKind = (uint8_t)(outBits & 0xFFu);
+}
+
+static int ScoreIl2CppTypesTableCandidate(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    uint32_t tableOff,
+    int32_t numTypes,
+    int32_t typeDefCount
+) {
+    if (numTypes <= 0 || typeDefCount <= 0) return 0;
+    if ((uint64_t)tableOff + (uint64_t)numTypes * 8u > metadata.size()) return 0;
+    int score = 0;
+    const int step = typeDefCount > 128 ? (typeDefCount / 64) : 1;
+    for (int32_t k = 0; k < typeDefCount; k += step) {
+        const uint8_t* td = GetTypeDefAt(metadata, header, version, k);
+        if (!td) continue;
+        int32_t bi = TypeDefByvalTypeIndex(td, version);
+        if (bi < 0 || bi >= numTypes) continue;
+        uint32_t dp = 0, bits = 0;
+        uint8_t kind = 0;
+        ReadIl2CppMetadataTypeRaw(metadata, tableOff, bi, dp, bits, kind);
+        if (kind == IL2CPP_TYPE_END) continue;
+        if (kind > IL2CPP_TYPE_MVAR && kind != IL2CPP_TYPE_INTERNAL) continue;
+        score += 1;
+        if ((kind == IL2CPP_TYPE_CLASS || kind == IL2CPP_TYPE_VALUETYPE) && (int32_t)dp == k)
+            score += 3;
+    }
+    return score;
+}
+
+static int32_t ComputeMaxMetadataTypeIndex(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version
+) {
+    int32_t maxIdx = 0;
+    int32_t typeDefCount = header.typeDefinitionsCount / (int32_t)TypeDefSizeForVersion(version);
+    for (int32_t i = 0; i < typeDefCount; ++i) {
+        const uint8_t* td = GetTypeDefAt(metadata, header, version, i);
+        if (!td) continue;
+        int32_t b = TypeDefByvalTypeIndex(td, version);
+        if (b > maxIdx) maxIdx = b;
+    }
+    int32_t methodCount = header.methodsCount / (int32_t)MethodDefSizeForVersion(version);
+    for (int32_t mi = 0; mi < methodCount; ++mi) {
+        const uint8_t* m = GetMethodDefAt(metadata, header, version, mi);
+        if (!m) continue;
+        int32_t rt = MethodDefReturnTypeIndex(m, version);
+        if (rt > maxIdx) maxIdx = rt;
+    }
+    size_t psz = ParameterDefSizeForVersion(version);
+    if (header.parametersCount > 0 && psz > 0) {
+        int32_t nparam = header.parametersCount / (int32_t)psz;
+        for (int32_t pi = 0; pi < nparam; ++pi) {
+            const uint8_t* pd = GetParameterDefAt(metadata, header, version, pi);
+            if (!pd) continue;
+            int32_t ti = ParameterDefTypeIndex(pd, version);
+            if (ti > maxIdx) maxIdx = ti;
+        }
+    }
+    return maxIdx;
+}
+
+struct MetadataIl2CppTypesLookup {
+    uint64_t cacheKey = 0;
+    uint32_t tableOffset = 0;
+    int32_t numTypes = 0;
+};
+
+static MetadataIl2CppTypesLookup g_metadataTypesLookup;
+
+static uint64_t MetadataQuickKey(const std::vector<uint8_t>& metadata, int32_t version) {
+    uint64_t k = (uint64_t)metadata.size() ^ ((uint64_t)(uint32_t)version << 32);
+    for (size_t i = 0; i < metadata.size() && i < 32; ++i)
+        k = k * 1315423911u + metadata[i];
+    return k;
+}
+
+static void ResolveMetadataIl2CppTypesTable(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    uint32_t& outTableOff,
+    int32_t& outNumTypes
+) {
+    outTableOff = 0;
+    outNumTypes = 0;
+    uint64_t key = MetadataQuickKey(metadata, version);
+    if (g_metadataTypesLookup.cacheKey == key && g_metadataTypesLookup.numTypes > 0) {
+        outTableOff = g_metadataTypesLookup.tableOffset;
+        outNumTypes = g_metadataTypesLookup.numTypes;
+        return;
+    }
+
+    int32_t typeDefCount = header.typeDefinitionsCount / (int32_t)TypeDefSizeForVersion(version);
+    int32_t maxIdx = ComputeMaxMetadataTypeIndex(metadata, header, version);
+    if (maxIdx < 0 || typeDefCount <= 0) {
+        g_metadataTypesLookup = { key, 0, 0 };
+        return;
+    }
+    int32_t numTypes = maxIdx + 1;
+    if (numTypes > 2000000) {
+        g_metadataTypesLookup = { key, 0, 0 };
+        return;
+    }
+
+    std::vector<uint32_t> candidates;
+    candidates.reserve(128);
+    const uint8_t* hb = (const uint8_t*)&header;
+    for (size_t i = 0; i + 4 <= sizeof(header); i += 4) {
+        uint32_t v = *(const uint32_t*)(hb + i);
+        if (v < sizeof(header) || (uint64_t)v + (uint64_t)numTypes * 8u > metadata.size()) continue;
+        candidates.push_back(v);
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    int bestScore = 0;
+    uint32_t bestOff = 0;
+    for (uint32_t O : candidates) {
+        if ((O % 4u) != 0) continue;
+        int sc = ScoreIl2CppTypesTableCandidate(metadata, header, version, O, numTypes, typeDefCount);
+        if (sc > bestScore) {
+            bestScore = sc;
+            bestOff = O;
+        }
+    }
+
+    const int minWant = (typeDefCount / 48) > 6 ? (typeDefCount / 48) : 6;
+    if (bestScore >= minWant && bestOff != 0) {
+        outTableOff = bestOff;
+        outNumTypes = numTypes;
+    }
+
+    g_metadataTypesLookup.cacheKey = key;
+    g_metadataTypesLookup.tableOffset = outTableOff;
+    g_metadataTypesLookup.numTypes = outNumTypes;
+}
+
+static std::string Il2CppMetadataTypeIndexToString(
+    const std::vector<uint8_t>& metadata,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    uint32_t tableOff,
+    int32_t numTypes,
+    int32_t typeDefCount,
+    int32_t typeIndex,
+    int depth
+) {
+    if (depth > 10 || typeIndex < 0 || (numTypes > 0 && typeIndex >= numTypes))
+        return "?";
+    if (tableOff == 0 || numTypes <= 0) return "?";
+
+    uint32_t dp = 0, bits = 0;
+    uint8_t kind = 0;
+    ReadIl2CppMetadataTypeRaw(metadata, tableOff, typeIndex, dp, bits, kind);
+
+    switch (kind) {
+    case IL2CPP_TYPE_VOID: return "void";
+    case IL2CPP_TYPE_BOOLEAN: return "bool";
+    case IL2CPP_TYPE_CHAR: return "char";
+    case IL2CPP_TYPE_I1: return "sbyte";
+    case IL2CPP_TYPE_U1: return "byte";
+    case IL2CPP_TYPE_I2: return "short";
+    case IL2CPP_TYPE_U2: return "ushort";
+    case IL2CPP_TYPE_I4: return "int";
+    case IL2CPP_TYPE_U4: return "uint";
+    case IL2CPP_TYPE_I8: return "long";
+    case IL2CPP_TYPE_U8: return "ulong";
+    case IL2CPP_TYPE_R4: return "float";
+    case IL2CPP_TYPE_R8: return "double";
+    case IL2CPP_TYPE_STRING: return "string";
+    case IL2CPP_TYPE_I: return "nint";
+    case IL2CPP_TYPE_U: return "nuint";
+    case IL2CPP_TYPE_OBJECT: return "object";
+    case IL2CPP_TYPE_TYPEDBYREF: return "typedref";
+    case IL2CPP_TYPE_CLASS:
+    case IL2CPP_TYPE_VALUETYPE:
+        if ((int32_t)dp >= 0 && (int32_t)dp < typeDefCount)
+            return QualifiedTypeDefinitionName(metadata, header, version, (int32_t)dp);
+        return "object";
+    case IL2CPP_TYPE_PTR:
+        return Il2CppMetadataTypeIndexToString(metadata, header, version, tableOff, numTypes, typeDefCount, (int32_t)dp, depth + 1) + "*";
+    case IL2CPP_TYPE_BYREF:
+        return Il2CppMetadataTypeIndexToString(metadata, header, version, tableOff, numTypes, typeDefCount, (int32_t)dp, depth + 1) + "&";
+    case IL2CPP_TYPE_SZARRAY:
+        return Il2CppMetadataTypeIndexToString(metadata, header, version, tableOff, numTypes, typeDefCount, (int32_t)dp, depth + 1) + "[]";
+    case IL2CPP_TYPE_VAR:
+    case IL2CPP_TYPE_MVAR:
+        return "T";
+    case IL2CPP_TYPE_ARRAY:
+        return "Array";
+    case IL2CPP_TYPE_GENERICINST:
+        return "object";
+    case IL2CPP_TYPE_FNPTR:
+        return "fnptr";
+    default:
+        return "?";
+    }
 }
 
 static int32_t MethodDefDeclaringType(const uint8_t* p, int32_t version) {
@@ -671,7 +1090,8 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
     const std::vector<uint8_t>& gameAssemblyBytes,
     const char* namespaze,
     const char* className,
-    const char* methodName
+    const char* methodName,
+    bool verboseLog = true
 ) {
     const uint8_t* m = GetMethodDefAt(metadata, header, version, methodDefinitionIndex);
     if (!m) return 0;
@@ -825,22 +1245,26 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
                 }
             }
             if (!picked) {
-                LizardResolverLogf("[Resolver:file] Ambiguous codegen module for %s.%s::%s (wanted=%s): %llu matches, cannot pick RVA.\n",
-                    namespaze ? namespaze : "",
-                    className ? className : "",
-                    methodName ? methodName : "",
-                    wantedModule.c_str(),
-                    (unsigned long long)candidateMods.size());
+                if (verboseLog) {
+                    LizardResolverLogf("[Resolver:file] Ambiguous codegen module for %s.%s::%s (wanted=%s): %llu matches, cannot pick RVA.\n",
+                        namespaze ? namespaze : "",
+                        className ? className : "",
+                        methodName ? methodName : "",
+                        wantedModule.c_str(),
+                        (unsigned long long)candidateMods.size());
+                }
                 continue;
             }
         }
 
-        LizardResolverLogf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
-            imageName.c_str(),
-            usedModuleCandidate.c_str(),
-            gotFromCodeReg ? "CodeRegistration" : "Heuristic",
-            (unsigned long long)candidateMods.size(),
-            best);
+        if (verboseLog) {
+            LizardResolverLogf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
+                imageName.c_str(),
+                usedModuleCandidate.c_str(),
+                gotFromCodeReg ? "CodeRegistration" : "Heuristic",
+                (unsigned long long)candidateMods.size(),
+                best);
+        }
         return (uintptr_t)best;
     }
 
@@ -1329,7 +1753,8 @@ struct MethodAnchor {
 static bool AutoDetectMethodPointersRva(
     const std::vector<uint8_t>& metadataBytes,
     const std::vector<uint8_t>& gameAssemblyBytes,
-    uintptr_t& outRva
+    uintptr_t& outRva,
+    bool logOutcome = true
 ) {
     if (metadataBytes.size() < 0x80) return false;
     const Il2CppGlobalMetadataHeader* header = (const Il2CppGlobalMetadataHeader*)metadataBytes.data();
@@ -1406,13 +1831,15 @@ static bool AutoDetectMethodPointersRva(
                 if (!IsExecutableVa(firstVa, imageBase, sections)) continue;
 
                 outRva = (uintptr_t)candidateRva;
-                LizardResolverLogf("[Resolver:file] Auto-detected methodPointers RVA: 0x%p\n", (void*)outRva);
+                if (logOutcome)
+                    LizardResolverLogf("[Resolver:file] Auto-detected methodPointers RVA: 0x%p\n", (void*)outRva);
                 return true;
             }
         }
     }
 
-    LizardResolverLogf("[Resolver:file] Auto-detect methodPointers RVA failed.\n");
+    if (logOutcome)
+        LizardResolverLogf("[Resolver:file] Auto-detect methodPointers RVA failed.\n");
     return false;
 }
 
@@ -1442,6 +1869,95 @@ static bool ResolveIl2CppApi(
         classGetMethods && methodGetName && methodGetParamCount && methodGetPointer;
 }
 
+static uintptr_t ResolveMethodDefIndexToRvaFromLoaded(
+    const std::vector<uint8_t>& metadataBytes,
+    const Il2CppGlobalMetadataHeader& header,
+    int32_t version,
+    int32_t methodDefIndex,
+    int32_t methodPointersSlotIndex,
+    const std::vector<uint8_t>& gameAssemblyBytes,
+    const char* namespaze,
+    const char* className,
+    const char* methodName,
+    bool verboseLog
+) {
+    if (version >= 24) {
+        uintptr_t moduleResolved = ResolveMethodOffsetFromCodeGenModule(
+            metadataBytes,
+            header,
+            version,
+            methodDefIndex,
+            gameAssemblyBytes,
+            namespaze,
+            className,
+            methodName,
+            verboseLog
+        );
+        if (moduleResolved != 0) {
+            if (verboseLog) {
+                LizardResolverLogf("[Resolver:file] module path used: %s.%s::%s -> 0x%p\n",
+                    namespaze ? namespaze : "",
+                    className ? className : "",
+                    methodName ? methodName : "",
+                    (void*)moduleResolved);
+            }
+            return moduleResolved;
+        }
+        if (verboseLog) {
+            LizardResolverLogf("[Resolver:file] module path failed for: %s.%s::%s, fallback to global table\n",
+                namespaze ? namespaze : "",
+                className ? className : "",
+                methodName ? methodName : "");
+        }
+    }
+
+    if (methodPointersSlotIndex < 0) {
+        if (verboseLog) {
+            LizardResolverLogf("[Resolver:file] Invalid method pointer index for: %s.%s::%s\n",
+                namespaze ? namespaze : "",
+                className ? className : "",
+                methodName ? methodName : "");
+        }
+        return 0;
+    }
+
+    if (g_methodPointersRva == 0) {
+        uintptr_t autoRva = 0;
+        if (AutoDetectMethodPointersRva(metadataBytes, gameAssemblyBytes, autoRva, verboseLog)) {
+            g_methodPointersRva = autoRva;
+        }
+        else {
+            if (verboseLog)
+                LizardResolverLogf("[Resolver:file] g_methodPointersRva is not set and auto-detect failed.\n");
+            return 0;
+        }
+    }
+
+    uint32_t tableOffset = RvaToFileOffset(gameAssemblyBytes, (uint32_t)g_methodPointersRva);
+    if (tableOffset == 0) {
+        if (verboseLog)
+            LizardResolverLogf("[Resolver:file] Invalid methodPointers RVA: 0x%p\n", (void*)g_methodPointersRva);
+        return 0;
+    }
+
+    uint64_t ptrOffset = (uint64_t)tableOffset + (uint64_t)methodPointersSlotIndex * sizeof(uint64_t);
+    if (ptrOffset + sizeof(uint64_t) > gameAssemblyBytes.size()) {
+        if (verboseLog)
+            LizardResolverLogf("[Resolver:file] methodPointers index out of range: %d\n", methodPointersSlotIndex);
+        return 0;
+    }
+
+    uint64_t methodVa = *(uint64_t*)(gameAssemblyBytes.data() + ptrOffset);
+    uint64_t imageBase = GetImageBase(gameAssemblyBytes);
+    if (imageBase == 0 || methodVa <= imageBase) {
+        if (verboseLog)
+            LizardResolverLogf("[Resolver:file] Invalid method VA or image base.\n");
+        return 0;
+    }
+
+    return (uintptr_t)(methodVa - imageBase);
+}
+
 static uintptr_t ResolveMethodOffsetFromFiles(
     const char* namespaze,
     const char* className,
@@ -1463,8 +1979,8 @@ static uintptr_t ResolveMethodOffsetFromFiles(
         LizardResolverLogf("[Resolver:file] Method not found in metadata: %s.%s::%s\n", namespaze, className, methodName);
         return 0;
     }
-    int32_t methodIndex = GetMethodPointersTableIndex(metadataBytes, *header, version, methodDefIndex);
-    if (methodIndex < 0) {
+    int32_t methodPointersSlotIndex = GetMethodPointersTableIndex(metadataBytes, *header, version, methodDefIndex);
+    if (methodPointersSlotIndex < 0) {
         LizardResolverLogf("[Resolver:file] Invalid method pointer index for: %s.%s::%s\n", namespaze, className, methodName);
         return 0;
     }
@@ -1475,56 +1991,18 @@ static uintptr_t ResolveMethodOffsetFromFiles(
         return 0;
     }
 
-    // Newer IL2CPP usually resolves by token + module-specific methodPointers.
-    if (version >= 24) {
-        uintptr_t moduleResolved = ResolveMethodOffsetFromCodeGenModule(
-            metadataBytes,
-            *header,
-            version,
-            methodDefIndex,
-            gameAssemblyBytes,
-            namespaze,
-            className,
-            methodName
-        );
-        if (moduleResolved != 0) {
-            LizardResolverLogf("[Resolver:file] module path used: %s.%s::%s -> 0x%p\n", namespaze, className, methodName, (void*)moduleResolved);
-            return moduleResolved;
-        }
-        LizardResolverLogf("[Resolver:file] module path failed for: %s.%s::%s, fallback to global table\n", namespaze, className, methodName);
-    }
-
-    if (g_methodPointersRva == 0) {
-        uintptr_t autoRva = 0;
-        if (AutoDetectMethodPointersRva(metadataBytes, gameAssemblyBytes, autoRva)) {
-            g_methodPointersRva = autoRva;
-        }
-        else {
-            LizardResolverLogf("[Resolver:file] g_methodPointersRva is not set and auto-detect failed.\n");
-            return 0;
-        }
-    }
-
-    uint32_t tableOffset = RvaToFileOffset(gameAssemblyBytes, (uint32_t)g_methodPointersRva);
-    if (tableOffset == 0) {
-        LizardResolverLogf("[Resolver:file] Invalid methodPointers RVA: 0x%p\n", (void*)g_methodPointersRva);
-        return 0;
-    }
-
-    uint64_t ptrOffset = (uint64_t)tableOffset + (uint64_t)methodIndex * sizeof(uint64_t);
-    if (ptrOffset + sizeof(uint64_t) > gameAssemblyBytes.size()) {
-        LizardResolverLogf("[Resolver:file] methodPointers index out of range: %d\n", methodIndex);
-        return 0;
-    }
-
-    uint64_t methodVa = *(uint64_t*)(gameAssemblyBytes.data() + ptrOffset);
-    uint64_t imageBase = GetImageBase(gameAssemblyBytes);
-    if (imageBase == 0 || methodVa <= imageBase) {
-        LizardResolverLogf("[Resolver:file] Invalid method VA or image base.\n");
-        return 0;
-    }
-
-    return (uintptr_t)(methodVa - imageBase);
+    return ResolveMethodDefIndexToRvaFromLoaded(
+        metadataBytes,
+        *header,
+        version,
+        methodDefIndex,
+        methodPointersSlotIndex,
+        gameAssemblyBytes,
+        namespaze,
+        className,
+        methodName,
+        true
+    );
 }
 
 static uintptr_t FindMethodOffsetByClassAndMethod(
@@ -1650,6 +2128,103 @@ inline bool SearchMetadataMethodsForSubstring(
         char line[1024];
         snprintf(line, sizeof(line), "%s::%s", full.c_str(), mn);
         out.push_back(line);
+    }
+    return true;
+}
+
+struct ExplorerMethodHit {
+    std::string returnType;
+    std::string qualifiedMethod;
+    std::string paramList;
+    std::string rvaText;
+};
+
+// Explorer: managed return type, qualified name, hook-style params; RVA last in rvaText (colored in UI).
+inline bool SearchMetadataMethodsForExplorer(
+    const std::vector<uint8_t>& metadata,
+    const std::vector<uint8_t>& gameAssemblyBytes,
+    const char* needle,
+    int maxResults,
+    std::vector<ExplorerMethodHit>& out
+) {
+    out.clear();
+    if (!needle || !needle[0] || maxResults <= 0) return false;
+    if (metadata.size() < 0x80) return false;
+    const Il2CppGlobalMetadataHeader* header = (const Il2CppGlobalMetadataHeader*)metadata.data();
+    if (header->sanity != 0xFAB11BAF) return false;
+    int32_t version = header->version;
+    int32_t typeCount = header->typeDefinitionsCount / (int32_t)TypeDefSizeForVersion(version);
+    int32_t methodCount = header->methodsCount / (int32_t)MethodDefSizeForVersion(version);
+    if (typeCount <= 0 || methodCount <= 0) return false;
+    if ((uint64_t)header->typeDefinitionsOffset + (uint64_t)header->typeDefinitionsCount > metadata.size()) return false;
+    if ((uint64_t)header->methodsOffset + (uint64_t)header->methodsCount > metadata.size()) return false;
+
+    const bool haveGa = !gameAssemblyBytes.empty();
+
+    uint32_t typeTable = 0;
+    int32_t numIl2cppTypes = 0;
+    ResolveMetadataIl2CppTypesTable(metadata, *header, version, typeTable, numIl2cppTypes);
+
+    for (int32_t mi = 0; mi < methodCount && (int)out.size() < maxResults; ++mi) {
+        const uint8_t* m = GetMethodDefAt(metadata, *header, version, mi);
+        if (!m) continue;
+        const char* mn = MetadataString(metadata, *header, (int32_t)MethodDefNameIndex(m, version));
+        if (!mn) continue;
+        if (!AsciiSubstringCi(mn, needle)) continue;
+        int32_t decl = MethodDefDeclaringType(m, version);
+        if (decl < 0 || decl >= typeCount) continue;
+        const uint8_t* t = GetTypeDefAt(metadata, *header, version, decl);
+        if (!t) continue;
+        const char* cn = MetadataString(metadata, *header, (int32_t)TypeDefNameIndex(t, version));
+        const char* ns = MetadataString(metadata, *header, (int32_t)TypeDefNamespaceIndex(t, version));
+        if (!cn) cn = "";
+        if (!ns) ns = "";
+        std::string full = ns[0] ? (std::string(ns) + "." + std::string(cn)) : std::string(cn);
+
+        std::string params = BuildHookStyleParamListFromMethodDef(metadata, *header, version, m);
+
+        uintptr_t rva = 0;
+        if (haveGa) {
+            int32_t slot = GetMethodPointersTableIndex(metadata, *header, version, mi);
+            if (slot >= 0) {
+                rva = ResolveMethodDefIndexToRvaFromLoaded(
+                    metadata,
+                    *header,
+                    version,
+                    mi,
+                    slot,
+                    gameAssemblyBytes,
+                    ns,
+                    cn,
+                    mn,
+                    false
+                );
+            }
+        }
+
+        ExplorerMethodHit hit;
+        hit.returnType = Il2CppMetadataTypeIndexToString(
+            metadata,
+            *header,
+            version,
+            typeTable,
+            numIl2cppTypes,
+            typeCount,
+            MethodDefReturnTypeIndex(m, version),
+            0
+        );
+        hit.qualifiedMethod = full + "::" + mn;
+        hit.paramList = std::move(params);
+        if (haveGa) {
+            char rvaBuf[48];
+            if (rva != 0)
+                snprintf(rvaBuf, sizeof(rvaBuf), "RVA=0x%llX", (unsigned long long)rva);
+            else
+                snprintf(rvaBuf, sizeof(rvaBuf), "RVA=?");
+            hit.rvaText = rvaBuf;
+        }
+
+        out.push_back(std::move(hit));
     }
     return true;
 }
