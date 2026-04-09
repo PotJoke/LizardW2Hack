@@ -6,8 +6,7 @@ void* g_hook_originals[kMaxHookSlots];
 
 static void PrintLogLine(const HookSlotRuntime& c) {
     if (c.log_line.empty()) return;
-    printf("%s", c.log_line.c_str());
-    if (c.log_line.back() != '\n') printf("\n");
+    LizardLogRawUtf8(c.log_line.c_str());
 }
 
 #define DEF_METHOD(N) \

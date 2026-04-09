@@ -24,6 +24,12 @@
     <ClInclude Include="hook_config.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="lizard_log.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="metadata_explorer.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
     <ClInclude Include="banner_logo.inc">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
@@ -36,6 +42,12 @@
       <Filter>Исходные файлы</Filter>
     </ClCompile>
     <ClCompile Include="hook_detours.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="lizard_log.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="metadata_explorer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">

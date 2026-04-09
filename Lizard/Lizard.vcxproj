@@ -152,12 +152,16 @@
     <ClInclude Include="banner_logo.inc" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="hook_config.h" />
+    <ClInclude Include="lizard_log.h" />
+    <ClInclude Include="metadata_explorer.h" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="hook_config.cpp" />
     <ClCompile Include="hook_detours.cpp" />
+    <ClCompile Include="lizard_log.cpp" />
+    <ClCompile Include="metadata_explorer.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>

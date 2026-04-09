@@ -2,17 +2,19 @@
 
 #include <Windows.h>
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "lizard_log.h"
+
 static std::string g_globalMetadataPath = "";
 static std::string g_gameAssemblyPath = "";
 static uintptr_t g_methodPointersRva = 0x0;
 static bool g_pathsResolved = false;
-static bool g_pathsResolveTried = false;
 
 typedef void* (*il2cpp_domain_get_t)();
 typedef void (*il2cpp_domain_get_assemblies_t)(void* domain, const void*** assemblies, size_t* size);
@@ -823,7 +825,7 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
                 }
             }
             if (!picked) {
-                printf("[Resolver:file] Ambiguous codegen module for %s.%s::%s (wanted=%s): %llu matches, cannot pick RVA.\n",
+                LizardResolverLogf("[Resolver:file] Ambiguous codegen module for %s.%s::%s (wanted=%s): %llu matches, cannot pick RVA.\n",
                     namespaze ? namespaze : "",
                     className ? className : "",
                     methodName ? methodName : "",
@@ -833,7 +835,7 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
             }
         }
 
-        printf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
+        LizardResolverLogf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
             imageName.c_str(),
             usedModuleCandidate.c_str(),
             gotFromCodeReg ? "CodeRegistration" : "Heuristic",
@@ -871,8 +873,29 @@ static int32_t GetMethodPointersTableIndex(
 }
 
 static bool ReadAllBytes(const std::string& path, std::vector<uint8_t>& out) {
+    if (path.empty()) return false;
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return false;
+    if (!file.is_open()) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+        if (fseek(f, 0, SEEK_END) != 0) {
+            fclose(f);
+            return false;
+        }
+        long sz = ftell(f);
+        if (sz <= 0) {
+            fclose(f);
+            return false;
+        }
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return false;
+        }
+        out.resize((size_t)sz);
+        size_t rd = fread(out.data(), 1, (size_t)sz, f);
+        fclose(f);
+        return rd == (size_t)sz;
+    }
     std::streamsize size = file.tellg();
     if (size <= 0) return false;
     file.seekg(0, std::ios::beg);
@@ -911,22 +934,56 @@ static bool FileExists(const std::string& path) {
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// When ProductName_Data != exe basename (e.g. Hornysolation_Data + Hyperborea.exe), scan sibling *_Data folders.
+static bool TryMetadataInDataSubfolders(const std::string& rootDir, std::string& outPath) {
+    if (rootDir.empty()) return false;
+    std::string searchPat = JoinPath(rootDir, "*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(searchPat.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        size_t L = strlen(fd.cFileName);
+        if (L < 5) continue;
+        if (_stricmp(fd.cFileName + (L - 5), "_Data") != 0) continue;
+        std::string inner = std::string(fd.cFileName) + "\\il2cpp_data\\Metadata\\global-metadata.dat";
+        std::string cand = JoinPath(rootDir, inner);
+        if (FileExists(cand)) {
+            outPath = std::move(cand);
+            found = true;
+            break;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
 static bool ResolvePathsRelativeToGameAssembly() {
-    if (g_pathsResolveTried) {
-        return g_pathsResolved;
+    if (!g_globalMetadataPath.empty() && FileExists(g_globalMetadataPath)) {
+        g_pathsResolved = true;
+        return true;
     }
-    g_pathsResolveTried = true;
 
     HMODULE gameAssembly = GetModuleHandleA("GameAssembly.dll");
     if (!gameAssembly) {
-        printf("[Resolver] GameAssembly module not found.\n");
+        static bool s_loggedGa = false;
+        if (!s_loggedGa) {
+            LizardResolverLogf("[Resolver] GameAssembly module not found.\n");
+            s_loggedGa = true;
+        }
         g_pathsResolved = false;
         return false;
     }
 
     std::string assemblyPath = GetModuleFilePath(gameAssembly);
     if (assemblyPath.empty()) {
-        printf("[Resolver] Failed to resolve GameAssembly path.\n");
+        static bool s_loggedAp = false;
+        if (!s_loggedAp) {
+            LizardResolverLogf("[Resolver] Failed to resolve GameAssembly path.\n");
+            s_loggedAp = true;
+        }
         g_pathsResolved = false;
         return false;
     }
@@ -936,11 +993,6 @@ static bool ResolvePathsRelativeToGameAssembly() {
     std::string exePath = GetModuleFilePath(GetModuleHandleA(NULL));
     std::string exeName = GetFileNameWithoutExtension(exePath);
     std::string exeDir = GetFileDirectory(exePath);
-
-    if (!g_globalMetadataPath.empty() && FileExists(g_globalMetadataPath)) {
-        g_pathsResolved = true;
-        return true;
-    }
 
     std::vector<std::string> candidates;
     if (!exeName.empty()) {
@@ -964,7 +1016,19 @@ static bool ResolvePathsRelativeToGameAssembly() {
         }
     }
 
-    printf("[Resolver] Failed to resolve global-metadata.dat relative to GameAssembly.\n");
+    std::string discovered;
+    if (TryMetadataInDataSubfolders(assemblyDir, discovered) || TryMetadataInDataSubfolders(exeDir, discovered)) {
+        g_globalMetadataPath = std::move(discovered);
+        g_pathsResolved = true;
+        return true;
+    }
+
+    static bool s_loggedMeta = false;
+    if (!s_loggedMeta) {
+        LizardResolverLogf("[Resolver] Failed to resolve global-metadata.dat relative to GameAssembly.\n");
+        s_loggedMeta = true;
+    }
+    g_globalMetadataPath.clear();
     g_pathsResolved = false;
     return false;
 }
@@ -1292,7 +1356,7 @@ static bool AutoDetectMethodPointersRva(
     }
 
     if (methodIndices.size() < 3) {
-        printf("[Resolver:file] Auto-detect skipped: not enough metadata anchors.\n");
+        LizardResolverLogf("[Resolver:file] Auto-detect skipped: not enough metadata anchors.\n");
         return false;
     }
 
@@ -1300,7 +1364,7 @@ static bool AutoDetectMethodPointersRva(
     uint64_t imageBase = 0;
     uint32_t imageSize = 0;
     if (!GetPeSections(gameAssemblyBytes, sections, imageBase, imageSize)) {
-        printf("[Resolver:file] Auto-detect failed: invalid PE.\n");
+        LizardResolverLogf("[Resolver:file] Auto-detect failed: invalid PE.\n");
         return false;
     }
 
@@ -1342,13 +1406,13 @@ static bool AutoDetectMethodPointersRva(
                 if (!IsExecutableVa(firstVa, imageBase, sections)) continue;
 
                 outRva = (uintptr_t)candidateRva;
-                printf("[Resolver:file] Auto-detected methodPointers RVA: 0x%p\n", (void*)outRva);
+                LizardResolverLogf("[Resolver:file] Auto-detected methodPointers RVA: 0x%p\n", (void*)outRva);
                 return true;
             }
         }
     }
 
-    printf("[Resolver:file] Auto-detect methodPointers RVA failed.\n");
+    LizardResolverLogf("[Resolver:file] Auto-detect methodPointers RVA failed.\n");
     return false;
 }
 
@@ -1386,7 +1450,7 @@ static uintptr_t ResolveMethodOffsetFromFiles(
 ) {
     std::vector<uint8_t> metadataBytes;
     if (!ReadAllBytes(g_globalMetadataPath, metadataBytes)) {
-        printf("[Resolver:file] Failed to read metadata: %s\n", g_globalMetadataPath.c_str());
+        LizardResolverLogf("[Resolver:file] Failed to read metadata: %s\n", g_globalMetadataPath.c_str());
         return 0;
     }
 
@@ -1396,18 +1460,18 @@ static uintptr_t ResolveMethodOffsetFromFiles(
 
     int32_t methodDefIndex = FindMethodDefinitionIndexInMetadata(metadataBytes, namespaze, className, methodName, paramCount);
     if (methodDefIndex < 0) {
-        printf("[Resolver:file] Method not found in metadata: %s.%s::%s\n", namespaze, className, methodName);
+        LizardResolverLogf("[Resolver:file] Method not found in metadata: %s.%s::%s\n", namespaze, className, methodName);
         return 0;
     }
     int32_t methodIndex = GetMethodPointersTableIndex(metadataBytes, *header, version, methodDefIndex);
     if (methodIndex < 0) {
-        printf("[Resolver:file] Invalid method pointer index for: %s.%s::%s\n", namespaze, className, methodName);
+        LizardResolverLogf("[Resolver:file] Invalid method pointer index for: %s.%s::%s\n", namespaze, className, methodName);
         return 0;
     }
 
     std::vector<uint8_t> gameAssemblyBytes;
     if (!ReadAllBytes(g_gameAssemblyPath, gameAssemblyBytes)) {
-        printf("[Resolver:file] Failed to read GameAssembly: %s\n", g_gameAssemblyPath.c_str());
+        LizardResolverLogf("[Resolver:file] Failed to read GameAssembly: %s\n", g_gameAssemblyPath.c_str());
         return 0;
     }
 
@@ -1424,10 +1488,10 @@ static uintptr_t ResolveMethodOffsetFromFiles(
             methodName
         );
         if (moduleResolved != 0) {
-            printf("[Resolver:file] module path used: %s.%s::%s -> 0x%p\n", namespaze, className, methodName, (void*)moduleResolved);
+            LizardResolverLogf("[Resolver:file] module path used: %s.%s::%s -> 0x%p\n", namespaze, className, methodName, (void*)moduleResolved);
             return moduleResolved;
         }
-        printf("[Resolver:file] module path failed for: %s.%s::%s, fallback to global table\n", namespaze, className, methodName);
+        LizardResolverLogf("[Resolver:file] module path failed for: %s.%s::%s, fallback to global table\n", namespaze, className, methodName);
     }
 
     if (g_methodPointersRva == 0) {
@@ -1436,27 +1500,27 @@ static uintptr_t ResolveMethodOffsetFromFiles(
             g_methodPointersRva = autoRva;
         }
         else {
-            printf("[Resolver:file] g_methodPointersRva is not set and auto-detect failed.\n");
+            LizardResolverLogf("[Resolver:file] g_methodPointersRva is not set and auto-detect failed.\n");
             return 0;
         }
     }
 
     uint32_t tableOffset = RvaToFileOffset(gameAssemblyBytes, (uint32_t)g_methodPointersRva);
     if (tableOffset == 0) {
-        printf("[Resolver:file] Invalid methodPointers RVA: 0x%p\n", (void*)g_methodPointersRva);
+        LizardResolverLogf("[Resolver:file] Invalid methodPointers RVA: 0x%p\n", (void*)g_methodPointersRva);
         return 0;
     }
 
     uint64_t ptrOffset = (uint64_t)tableOffset + (uint64_t)methodIndex * sizeof(uint64_t);
     if (ptrOffset + sizeof(uint64_t) > gameAssemblyBytes.size()) {
-        printf("[Resolver:file] methodPointers index out of range: %d\n", methodIndex);
+        LizardResolverLogf("[Resolver:file] methodPointers index out of range: %d\n", methodIndex);
         return 0;
     }
 
     uint64_t methodVa = *(uint64_t*)(gameAssemblyBytes.data() + ptrOffset);
     uint64_t imageBase = GetImageBase(gameAssemblyBytes);
     if (imageBase == 0 || methodVa <= imageBase) {
-        printf("[Resolver:file] Invalid method VA or image base.\n");
+        LizardResolverLogf("[Resolver:file] Invalid method VA or image base.\n");
         return 0;
     }
 
@@ -1499,7 +1563,7 @@ static uintptr_t FindMethodOffsetByClassAndMethod(
     )) {
         void* domain = domainGet();
         if (!domain) {
-            printf("[Resolver] il2cpp_domain_get returned null.\n");
+            LizardResolverLogf("[Resolver] il2cpp_domain_get returned null.\n");
             return 0;
         }
 
@@ -1529,10 +1593,63 @@ static uintptr_t FindMethodOffsetByClassAndMethod(
             }
         }
 
-        printf("[Resolver] Runtime API did not find: %s.%s::%s\n", namespaze, className, methodName);
+        LizardResolverLogf("[Resolver] Runtime API did not find: %s.%s::%s\n", namespaze, className, methodName);
         return 0;
     }
 
-    printf("[Resolver] IL2CPP exports unavailable after RVA attempt.\n");
+    LizardResolverLogf("[Resolver] IL2CPP exports unavailable after RVA attempt.\n");
     return 0;
+}
+
+inline bool ReadGlobalMetadataToVector(std::vector<uint8_t>& out) {
+    return ReadAllBytes(g_globalMetadataPath, out);
+}
+
+inline bool AsciiSubstringCi(const char* hay, const char* needle) {
+    if (!needle || !needle[0]) return false;
+    if (!hay) hay = "";
+    std::string h(hay);
+    std::string n(needle);
+    for (char& c : h) c = (char)tolower((unsigned char)c);
+    for (char& c : n) c = (char)tolower((unsigned char)c);
+    return h.find(n) != std::string::npos;
+}
+
+inline bool SearchMetadataMethodsForSubstring(
+    const std::vector<uint8_t>& metadata,
+    const char* needle,
+    int maxResults,
+    std::vector<std::string>& out
+) {
+    out.clear();
+    if (!needle || !needle[0] || maxResults <= 0) return false;
+    if (metadata.size() < 0x80) return false;
+    const Il2CppGlobalMetadataHeader* header = (const Il2CppGlobalMetadataHeader*)metadata.data();
+    if (header->sanity != 0xFAB11BAF) return false;
+    int32_t version = header->version;
+    int32_t typeCount = header->typeDefinitionsCount / (int32_t)TypeDefSizeForVersion(version);
+    int32_t methodCount = header->methodsCount / (int32_t)MethodDefSizeForVersion(version);
+    if (typeCount <= 0 || methodCount <= 0) return false;
+    if ((uint64_t)header->typeDefinitionsOffset + (uint64_t)header->typeDefinitionsCount > metadata.size()) return false;
+    if ((uint64_t)header->methodsOffset + (uint64_t)header->methodsCount > metadata.size()) return false;
+    for (int32_t mi = 0; mi < methodCount && (int)out.size() < maxResults; ++mi) {
+        const uint8_t* m = GetMethodDefAt(metadata, *header, version, mi);
+        if (!m) continue;
+        const char* mn = MetadataString(metadata, *header, (int32_t)MethodDefNameIndex(m, version));
+        if (!mn) continue;
+        if (!AsciiSubstringCi(mn, needle)) continue;
+        int32_t decl = MethodDefDeclaringType(m, version);
+        if (decl < 0 || decl >= typeCount) continue;
+        const uint8_t* t = GetTypeDefAt(metadata, *header, version, decl);
+        if (!t) continue;
+        const char* cn = MetadataString(metadata, *header, (int32_t)TypeDefNameIndex(t, version));
+        const char* ns = MetadataString(metadata, *header, (int32_t)TypeDefNamespaceIndex(t, version));
+        if (!cn) cn = "";
+        if (!ns) ns = "";
+        std::string full = ns[0] ? (std::string(ns) + "." + std::string(cn)) : std::string(cn);
+        char line[1024];
+        snprintf(line, sizeof(line), "%s::%s", full.c_str(), mn);
+        out.push_back(line);
+    }
+    return true;
 }
