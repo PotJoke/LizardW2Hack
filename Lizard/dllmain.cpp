@@ -98,7 +98,6 @@ static void PrintBanner() {
     PrintColor(g_colorOk, "=== LizardW2Hack ===\n");
     PrintColor(g_colorInfo, "Author: PotJoke\n");
     PrintColor(g_colorWarn, "Starting in 5 seconds...\n\n");
-    Sleep(5000);
 }
 
 static void Init() {

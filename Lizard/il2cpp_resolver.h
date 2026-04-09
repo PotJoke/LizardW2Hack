@@ -147,11 +147,12 @@ struct Il2CppMethodDefinitionV24 {
     uint16_t parameterCount;
 };
 
+// Unity metadata > 24.5 omits byrefTypeIndex (see Il2CppDumper Il2CppTypeDefinition [Version(Max = 24.5)]).
+// Keeping it for version > 24 misaligns methodStart/method_count and breaks name resolution on modern games.
 struct Il2CppTypeDefinitionV27Plus {
     int32_t nameIndex;
     int32_t namespaceIndex;
     int32_t byvalTypeIndex;
-    int32_t byrefTypeIndex;
     int32_t declaringTypeIndex;
     int32_t parentIndex;
     int32_t elementTypeIndex;
@@ -667,7 +668,8 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
     int32_t methodDefinitionIndex,
     const std::vector<uint8_t>& gameAssemblyBytes,
     const char* namespaze,
-    const char* className
+    const char* className,
+    const char* methodName
 ) {
     const uint8_t* m = GetMethodDefAt(metadata, header, version, methodDefinitionIndex);
     if (!m) return 0;
@@ -747,66 +749,100 @@ static uintptr_t ResolveMethodOffsetFromCodeGenModule(
     if ((uint64_t)modulesArrayRaw + modulesCount * sizeof(uint64_t) > gameAssemblyBytes.size()) return 0;
 
     const uint8_t* bytes = gameAssemblyBytes.data();
-    std::vector<uint32_t> candidateRvas;
+    struct ModuleCand {
+        uint32_t rva;
+        std::string modNorm;
+        std::string modRaw;
+    };
+    std::vector<ModuleCand> candidateMods;
     std::string usedModuleCandidate;
+
     for (const std::string& wantedModule : moduleCandidates) {
-        candidateRvas.clear();
+        candidateMods.clear();
         for (uint64_t i = 0; i < modulesCount; ++i) {
-        uint64_t modVa = *(const uint64_t*)(bytes + modulesArrayRaw + i * sizeof(uint64_t));
-        if (!IsPointerInSectionVa(modVa, sections, imageBase)) continue;
-        uint32_t modRaw = RvaToFileOffset(gameAssemblyBytes, (uint32_t)(modVa - imageBase));
-        if (modRaw == 0 || modRaw + 24 > gameAssemblyBytes.size()) continue;
+            uint64_t modVa = *(const uint64_t*)(bytes + modulesArrayRaw + i * sizeof(uint64_t));
+            if (!IsPointerInSectionVa(modVa, sections, imageBase)) continue;
+            uint32_t modRaw = RvaToFileOffset(gameAssemblyBytes, (uint32_t)(modVa - imageBase));
+            if (modRaw == 0 || modRaw + 24 > gameAssemblyBytes.size()) continue;
 
-        uint64_t moduleNameVa = *(const uint64_t*)(bytes + modRaw + 0);
-        uint64_t methodCount = *(const uint64_t*)(bytes + modRaw + 8);
-        uint64_t methodPtrsVa = *(const uint64_t*)(bytes + modRaw + 16);
-        if (methodCount == 0 || methodCount > 2000000) continue;
-        if (methodPointerIndex >= methodCount) continue;
-        if (methodPtrsVa <= imageBase) continue;
-        uint32_t methodPtrsRva = (uint32_t)(methodPtrsVa - imageBase);
-        if (!IsReadableRva(methodPtrsRva, sections)) continue;
+            uint64_t moduleNameVa = *(const uint64_t*)(bytes + modRaw + 0);
+            uint64_t methodCount = *(const uint64_t*)(bytes + modRaw + 8);
+            uint64_t methodPtrsVa = *(const uint64_t*)(bytes + modRaw + 16);
+            if (methodCount == 0 || methodCount > 2000000) continue;
+            if (methodPointerIndex >= methodCount) continue;
+            if (methodPtrsVa <= imageBase) continue;
+            uint32_t methodPtrsRva = (uint32_t)(methodPtrsVa - imageBase);
+            if (!IsReadableRva(methodPtrsRva, sections)) continue;
 
-        std::string moduleName;
-        if (!ReadAsciiZAtVa(gameAssemblyBytes, imageBase, moduleNameVa, moduleName)) continue;
-        std::string moduleNameNormalized = NormalizeModuleName(moduleName);
-        if (moduleNameNormalized != wantedModule) continue;
+            std::string moduleName;
+            if (!ReadAsciiZAtVa(gameAssemblyBytes, imageBase, moduleNameVa, moduleName)) continue;
+            std::string moduleNameNormalized = NormalizeModuleName(moduleName);
+            if (moduleNameNormalized != wantedModule) continue;
 
-        int score = ScoreMethodPointersTable(methodPtrsVa, methodCount);
-        if (score < 0) continue;
+            int score = ScoreMethodPointersTable(methodPtrsVa, methodCount);
+            if (score < 0) continue;
 
-        uint32_t methodPtrsRaw = RvaToFileOffset(gameAssemblyBytes, methodPtrsRva);
-        if (methodPtrsRaw == 0) continue;
-        uint64_t entryRaw = (uint64_t)methodPtrsRaw + (uint64_t)methodPointerIndex * sizeof(uint64_t);
-        if (entryRaw + sizeof(uint64_t) > gameAssemblyBytes.size()) continue;
-        uint64_t methodVa = *(const uint64_t*)(bytes + entryRaw);
-        if (methodVa <= imageBase) continue;
-        uint32_t methodRva = (uint32_t)(methodVa - imageBase);
-        if (!IsExecutableRva(methodRva, sections)) continue;
+            uint32_t methodPtrsRaw = RvaToFileOffset(gameAssemblyBytes, methodPtrsRva);
+            if (methodPtrsRaw == 0) continue;
+            uint64_t entryRaw = (uint64_t)methodPtrsRaw + (uint64_t)methodPointerIndex * sizeof(uint64_t);
+            if (entryRaw + sizeof(uint64_t) > gameAssemblyBytes.size()) continue;
+            uint64_t methodVa = *(const uint64_t*)(bytes + entryRaw);
+            if (methodVa <= imageBase) continue;
+            uint32_t methodRva = (uint32_t)(methodVa - imageBase);
+            if (!IsExecutableRva(methodRva, sections)) continue;
 
-        candidateRvas.push_back(methodRva);
+            candidateMods.push_back(ModuleCand{ methodRva, moduleNameNormalized, moduleName });
         }
 
-        if (!candidateRvas.empty()) {
-            usedModuleCandidate = wantedModule;
-            break;
+        if (candidateMods.empty()) continue;
+
+        usedModuleCandidate = wantedModule;
+        uint32_t best = 0;
+
+        if (candidateMods.size() == 1) {
+            best = candidateMods[0].rva;
+        } else {
+            // Multiple PE codegen modules matched the same normalized name — do NOT pick min RVA (wrong method).
+            // Prefer the module whose name matches the declaring image from global-metadata (e.g. Assembly-CSharp.dll).
+            std::string imageNorm = NormalizeModuleName(imageName);
+            bool picked = false;
+            for (const auto& c : candidateMods) {
+                if (c.modNorm == imageNorm) {
+                    best = c.rva;
+                    picked = true;
+                    break;
+                }
+            }
+            if (!picked && imageNorm == "mscorlib" && !LooksLikeSystemType(namespaze, className)) {
+                for (const auto& c : candidateMods) {
+                    if (c.modNorm == wantedModule) {
+                        best = c.rva;
+                        picked = true;
+                        break;
+                    }
+                }
+            }
+            if (!picked) {
+                printf("[Resolver:file] Ambiguous codegen module for %s.%s::%s (wanted=%s): %llu matches, cannot pick RVA.\n",
+                    namespaze ? namespaze : "",
+                    className ? className : "",
+                    methodName ? methodName : "",
+                    wantedModule.c_str(),
+                    (unsigned long long)candidateMods.size());
+                continue;
+            }
         }
+
+        printf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
+            imageName.c_str(),
+            usedModuleCandidate.c_str(),
+            gotFromCodeReg ? "CodeRegistration" : "Heuristic",
+            (unsigned long long)candidateMods.size(),
+            best);
+        return (uintptr_t)best;
     }
 
-    if (candidateRvas.empty()) return 0;
-
-    // Heuristic: prefer lower executable RVAs first (matches Il2CppDumper-like outputs in PE builds).
-    uint32_t best = candidateRvas[0];
-    for (uint32_t rva : candidateRvas) {
-        if (rva < best) best = rva;
-    }
-
-    printf("[Resolver:file] module candidates for %s (wanted=%s, source=%s): %llu, chosen RVA=0x%X\n",
-        imageName.c_str(),
-        usedModuleCandidate.c_str(),
-        gotFromCodeReg ? "CodeRegistration" : "Heuristic",
-        (unsigned long long)candidateRvas.size(),
-        best);
-    return (uintptr_t)best;
+    return 0;
 }
 
 static int32_t GetMethodPointersTableIndex(
@@ -1011,36 +1047,51 @@ static int32_t FindMethodDefinitionIndexInMetadata(
         return text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
     };
 
-    auto TypeHeuristicMatch = [&](const char* currentNs, const char* currentClass) -> bool {
+    // Stage 1: equality / merged-name cases only (safe for sibling types with same method name).
+    auto TypeHeuristicMatchStrict = [&](const char* currentNs, const char* currentClass) -> bool {
         if (TypeMatches(namespaze, className, currentNs, currentClass)) return true;
 
         std::string currentFull = currentNs[0] ? (std::string(currentNs) + "." + currentClass) : std::string(currentClass);
         std::string expectedFull = namespaze[0] ? (std::string(namespaze) + "." + className) : std::string(className);
 
-        // Fallbacks for weird metadata formatting:
-        // - full type stored as class when namespace is empty
-        // - partial namespace differences between tools and metadata
         if (currentFull == expectedFull) return true;
-        if (EndsWith(currentFull, "." + std::string(className))) return true;
-        if (EndsWith(expectedFull, "." + std::string(currentClass))) return true;
         if (std::string(currentClass) == expectedFull) return true;
         if (std::string(className) == currentFull) return true;
 
         return false;
     };
 
-    auto FindWithParamRule = [&](int requiredParamCount, bool heuristicTypeMatch) -> int32_t {
+    // Stage 2: some Unity builds split Namespace/Class differently; EndsWith can match those (use after strict fails).
+    auto TypeHeuristicMatchLoose = [&](const char* currentNs, const char* currentClass) -> bool {
+        if (TypeHeuristicMatchStrict(currentNs, currentClass)) return true;
+
+        std::string currentFull = currentNs[0] ? (std::string(currentNs) + "." + currentClass) : std::string(currentClass);
+        std::string expectedFull = namespaze[0] ? (std::string(namespaze) + "." + className) : std::string(className);
+
+        if (EndsWith(currentFull, "." + std::string(className))) return true;
+        if (EndsWith(expectedFull, "." + std::string(currentClass))) return true;
+
+        return false;
+    };
+
+    auto ExpectedFullTypeString = [&]() -> std::string {
+        if (!className || !className[0]) return {};
+        if (!namespaze || !namespaze[0]) return std::string(className);
+        return std::string(namespaze) + "." + std::string(className);
+    };
+
+    auto FindMethodOnExactFullTypeName = [&](int requiredParamCount) -> int32_t {
+        std::string expectedFull = ExpectedFullTypeString();
+        if (expectedFull.empty()) return -1;
         for (int32_t i = 0; i < typeCount; ++i) {
             const uint8_t* t = GetTypeDefAt(metadata, *header, version, i);
             if (!t) continue;
             const char* currentClass = MetadataString(metadata, *header, (int32_t)TypeDefNameIndex(t, version));
             const char* currentNs = MetadataString(metadata, *header, (int32_t)TypeDefNamespaceIndex(t, version));
-            if (heuristicTypeMatch) {
-                if (!TypeHeuristicMatch(currentNs, currentClass)) continue;
-            }
-            else {
-                if (!TypeMatches(namespaze, className, currentNs, currentClass)) continue;
-            }
+            if (!currentClass) currentClass = "";
+            if (!currentNs) currentNs = "";
+            std::string currentFull = currentNs[0] ? (std::string(currentNs) + "." + currentClass) : std::string(currentClass);
+            if (currentFull != expectedFull) continue;
 
             int32_t start = TypeDefMethodStart(t, version);
             int32_t count = (int32_t)TypeDefMethodCount(t, version);
@@ -1058,18 +1109,63 @@ static int32_t FindMethodDefinitionIndexInMetadata(
         return -1;
     };
 
-    int32_t idx = FindWithParamRule(paramCount, false);
+    enum class HeuristicMode { None, Strict, Loose };
+
+    auto FindWithParamRule = [&](int requiredParamCount, HeuristicMode mode) -> int32_t {
+        for (int32_t i = 0; i < typeCount; ++i) {
+            const uint8_t* t = GetTypeDefAt(metadata, *header, version, i);
+            if (!t) continue;
+            const char* currentClass = MetadataString(metadata, *header, (int32_t)TypeDefNameIndex(t, version));
+            const char* currentNs = MetadataString(metadata, *header, (int32_t)TypeDefNamespaceIndex(t, version));
+            if (currentClass == nullptr) currentClass = "";
+            if (currentNs == nullptr) currentNs = "";
+
+            if (mode == HeuristicMode::None) {
+                if (!TypeMatches(namespaze, className, currentNs, currentClass)) continue;
+            } else if (mode == HeuristicMode::Strict) {
+                if (!TypeHeuristicMatchStrict(currentNs, currentClass)) continue;
+            } else {
+                if (!TypeHeuristicMatchLoose(currentNs, currentClass)) continue;
+            }
+
+            int32_t start = TypeDefMethodStart(t, version);
+            int32_t count = (int32_t)TypeDefMethodCount(t, version);
+            if (start < 0 || count < 0 || start + count > methodCount) continue;
+
+            for (int32_t j = 0; j < count; ++j) {
+                const uint8_t* m = GetMethodDefAt(metadata, *header, version, start + j);
+                if (!m) continue;
+                const char* currentMethod = MetadataString(metadata, *header, (int32_t)MethodDefNameIndex(m, version));
+                if (!currentMethod) continue;
+                if (strcmp(currentMethod, methodName) != 0) continue;
+                if (requiredParamCount >= 0 && MethodDefParamCount(m, version) != (uint16_t)requiredParamCount) continue;
+                return start + j;
+            }
+        }
+        return -1;
+    };
+
+    int32_t idx = FindWithParamRule(paramCount, HeuristicMode::None);
     if (idx >= 0) return idx;
 
-    // Retry with relaxed type matching.
-    idx = FindWithParamRule(paramCount, true);
+    idx = FindMethodOnExactFullTypeName(paramCount);
+    if (idx >= 0) return idx;
+
+    idx = FindWithParamRule(paramCount, HeuristicMode::Strict);
+    if (idx >= 0) return idx;
+
+    idx = FindWithParamRule(paramCount, HeuristicMode::Loose);
     if (idx >= 0) return idx;
 
     if (paramCount >= 0) {
         // Some game builds expose different implicit parameters in metadata.
-        idx = FindWithParamRule(-1, false);
+        idx = FindWithParamRule(-1, HeuristicMode::None);
         if (idx >= 0) return idx;
-        idx = FindWithParamRule(-1, true);
+        idx = FindMethodOnExactFullTypeName(-1);
+        if (idx >= 0) return idx;
+        idx = FindWithParamRule(-1, HeuristicMode::Strict);
+        if (idx >= 0) return idx;
+        idx = FindWithParamRule(-1, HeuristicMode::Loose);
         if (idx >= 0) return idx;
     }
 
@@ -1129,9 +1225,31 @@ static int32_t FindMethodDefinitionIndexInMetadata(
         return bestIndex;
     }
 
-    // If method name is unique across metadata, take it even when type scoring is ambiguous.
-    if (bestIndex >= 0 && sameBest > 1 && !rawNameIndices.empty()) {
-        return bestIndex;
+    // Tie or ambiguous score: disambiguate by exact declaring type full name (Namespace.Class).
+    if (bestIndex >= 0 && sameBest > 1) {
+        std::string expFull = ExpectedFullTypeString();
+        if (!expFull.empty()) {
+            int32_t exactIdx = -1;
+            int exactCount = 0;
+            for (int32_t mi = 0; mi < methodCount; ++mi) {
+                const uint8_t* m = GetMethodDefAt(metadata, *header, version, mi);
+                if (!m) continue;
+                if (!NameMatches(m)) continue;
+                if (paramCount >= 0 && MethodDefParamCount(m, version) != (uint16_t)paramCount) continue;
+
+                int32_t declType = MethodDefDeclaringType(m, version);
+                const uint8_t* t = GetTypeDefAt(metadata, *header, version, declType);
+                if (!t) continue;
+                const char* cn = MetadataString(metadata, *header, (int32_t)TypeDefNameIndex(t, version));
+                const char* ns = MetadataString(metadata, *header, (int32_t)TypeDefNamespaceIndex(t, version));
+                std::string curFull = ns[0] ? (std::string(ns) + "." + cn) : std::string(cn);
+                if (curFull == expFull) {
+                    exactIdx = mi;
+                    exactCount++;
+                }
+            }
+            if (exactCount == 1) return exactIdx;
+        }
     }
 
     return -1;
@@ -1302,7 +1420,8 @@ static uintptr_t ResolveMethodOffsetFromFiles(
             methodDefIndex,
             gameAssemblyBytes,
             namespaze,
-            className
+            className,
+            methodName
         );
         if (moduleResolved != 0) {
             printf("[Resolver:file] module path used: %s.%s::%s -> 0x%p\n", namespaze, className, methodName, (void*)moduleResolved);
