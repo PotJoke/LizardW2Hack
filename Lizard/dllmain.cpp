@@ -14,7 +14,7 @@
 #include <vector>
 #include <wincon.h>
 
-uintptr_t GameAssembly = (uintptr_t)GetModuleHandle("GameAssembly.dll");
+static GameRuntimeMode g_runtimeMode = GameRuntimeMode::Unknown;
 
 WORD g_colorOk = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 WORD g_colorWarn = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
@@ -93,8 +93,11 @@ static void PrintBanner() {
 }
 
 static void Init() {
-    MH_Initialize();
+    MH_STATUS mh = MH_Initialize();
     CreateConsole();
+    if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED) {
+        LizardSessionLogf(g_colorError, "[Hook] MH_Initialize failed: %d\n", (int)mh);
+    }
 }
 
 static void ClearConsoleScreen() {
@@ -132,7 +135,11 @@ static void DrawCheatsPanel(const std::vector<HookDefinition>& defs, size_t item
     PrintBannerLogo();
     LizardLogf(g_colorOk, "LizardW2Hack by PotJoke\n");
     PrintTabBar(MainTab::Cheats);
-    LizardLogf(g_colorInfo, "Cheats: Up/Down, Enter toggle runtime, R reload config, E edit selected, Esc exit. Keys 1-3 switch tabs.\n\n");
+    LizardLogf(g_colorInfo, "Cheats: Up/Down, Enter toggle runtime, R reload config, E edit selected, Esc exit. Keys 1-3 switch tabs.\n");
+    if (g_runtimeMode == GameRuntimeMode::Mono) {
+        LizardLogf(g_colorInfo, "Mono mode: bool methods are hookable (supported arg shapes: total native args 0..5).\n");
+    }
+    LizardLogf(g_colorInfo, "\n");
     if (itemCount == 0) {
         LizardLogf(g_colorWarn, "No hooks loaded (check LizardHooks.txt).\n");
         return;
@@ -255,7 +262,11 @@ static void DrawExplorerPanel(
     PrintTabBar(MainTab::Explorer);
     LizardLogf(g_colorInfo, "Explorer: Enter search, Up/Down select. '+' add to config, '-' delete from config.\n");
     LizardLogf(g_colorWarn, "Note: keys 1-3 switch tabs (avoid leading digits in query).\n");
-    LizardLogf(g_colorInfo, "If search says path empty, wait until GameAssembly is loaded (e.g. main menu) and try again.\n\n");
+    if (g_runtimeMode == GameRuntimeMode::Mono) {
+        LizardLogf(g_colorInfo, "Mono runtime detected: searching loaded assemblies/methods in runtime.\n\n");
+    } else {
+        LizardLogf(g_colorInfo, "If search says path empty, wait until GameAssembly is loaded (e.g. main menu) and try again.\n\n");
+    }
     LizardLogf(g_colorOffset, "Query: %s\n", query.c_str());
     if (!status.empty()) LizardLogf(g_colorOk, "%s\n", status.c_str());
 
@@ -304,25 +315,25 @@ static void DrawExplorerPanel(
 
 bool CreateHookWithResolvedOffset(const char* hookName, uintptr_t offset, LPVOID detour, LPVOID* original) {
     if (offset == 0) {
-        LizardSessionLogf(g_colorWarn, "[Hook] Skip %s: resolved offset is 0x0\n", hookName);
+        LizardSessionLogf(g_colorWarn, "[Hook] Skip %s: resolved address is 0x0\n", hookName);
         return false;
     }
 
-    uintptr_t targetAddr = GameAssembly + offset;
+    uintptr_t targetAddr = offset;
     if (g_hookedTargets.find(targetAddr) != g_hookedTargets.end()) {
-        LizardSessionLogf(g_colorWarn, "[Hook] Skip %s: duplicate target 0x%llX already hooked\n", hookName, (unsigned long long)offset);
+        LizardSessionLogf(g_colorWarn, "[Hook] Skip %s: duplicate target 0x%p already hooked\n", hookName, (void*)targetAddr);
         return false;
     }
 
     LPVOID target = reinterpret_cast<LPVOID>(targetAddr);
     MH_STATUS status = MH_CreateHook(target, detour, original);
     if (status != MH_OK) {
-        LizardSessionLogf(g_colorError, "[Hook] Failed %s: offset=0x%llX, MH_STATUS=%d\n", hookName, (unsigned long long)offset, (int)status);
+        LizardSessionLogf(g_colorError, "[Hook] Failed %s: address=0x%p, MH_STATUS=%d\n", hookName, (void*)targetAddr, (int)status);
         return false;
     }
 
     g_hookedTargets.insert(targetAddr);
-    LizardSessionLogf(g_colorOk, "[Hook] Ready %s: offset=0x%llX\n", hookName, (unsigned long long)offset);
+    LizardSessionLogf(g_colorOk, "[Hook] Ready %s: address=0x%p\n", hookName, (void*)targetAddr);
     return true;
 }
 
@@ -331,10 +342,23 @@ static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
     PrintBanner();
     LizardSessionLogf(g_colorInfo, "Ready to serve master!\n");
     LizardSessionLogf(g_colorWarn, "Please do NOT close console\n");
-    ResolvePathsRelativeToGameAssembly();
-    LizardSessionLogf(g_colorInfo, "[Resolver] global-metadata path: %s\n", g_globalMetadataPath.c_str());
-    LizardSessionLogf(g_colorInfo, "[Resolver] GameAssembly path: %s\n", g_gameAssemblyPath.c_str());
-    LizardSessionLogf(g_colorInfo, "[Resolver] methodPointers RVA cache/current: 0x%p\n", (void*)g_methodPointersRva);
+    for (int i = 0; i < 120 && g_runtimeMode == GameRuntimeMode::Unknown; ++i) {
+        g_runtimeMode = DetectGameRuntimeMode();
+        if (g_runtimeMode != GameRuntimeMode::Unknown) break;
+        Sleep(250);
+    }
+    LizardSessionLogf(g_colorInfo, "[Runtime] detected mode: %s\n", RuntimeModeToString(g_runtimeMode));
+    if (g_runtimeMode == GameRuntimeMode::Il2Cpp) {
+        ResolvePathsRelativeToGameAssembly();
+        LizardSessionLogf(g_colorInfo, "[Resolver] global-metadata path: %s\n", g_globalMetadataPath.c_str());
+        LizardSessionLogf(g_colorInfo, "[Resolver] GameAssembly path: %s\n", g_gameAssemblyPath.c_str());
+        LizardSessionLogf(g_colorInfo, "[Resolver] methodPointers RVA cache/current: 0x%p\n", (void*)g_methodPointersRva);
+    } else if (g_runtimeMode == GameRuntimeMode::Mono) {
+        HMODULE monoMod = GetMonoModuleHandle();
+        LizardSessionLogf(g_colorInfo, "[MonoResolver] module: 0x%p\n", monoMod);
+    } else {
+        LizardSessionLogf(g_colorWarn, "[Runtime] failed to detect runtime. Hooks will not be resolved.\n");
+    }
 
     std::vector<HookDefinition> defs;
     std::wstring cfgPath;
@@ -350,11 +374,38 @@ static DWORD WINAPI ThreadMain(LPVOID /*param*/) {
 
         for (size_t i = 0; i < defs.size() && i < (size_t)kMaxHookSlots; ++i) {
             const HookDefinition& d = defs[i];
-            uintptr_t off = FindMethodOffsetByClassAndMethod(
-                d.namespaze.c_str(), d.class_name.c_str(), d.method_name.c_str(), d.param_count);
-            LizardSessionLogf(off == 0 ? g_colorError : g_colorOffset, "[Offsets] %s -> 0x%p\n", d.full_name.c_str(), (void*)off);
-            void* det = GetDetourForSignature(d.signature, (int)i);
-            CreateHookWithResolvedOffset(d.full_name.c_str(), off, det, &g_hook_originals[(int)i]);
+            uintptr_t methodAddr = 0;
+            void* det = nullptr;
+
+            if (g_runtimeMode == GameRuntimeMode::Mono) {
+                MonoResolvedMethodInfo mi = ResolveMonoMethodForHook(
+                    d.namespaze.c_str(), d.class_name.c_str(), d.method_name.c_str(), d.param_count);
+                if (!mi.found || mi.address == 0) {
+                    LizardSessionLogf(g_colorError, "[MonoHook] %s -> not found\n", d.full_name.c_str());
+                    continue;
+                }
+                if (!mi.returnsBool) {
+                    LizardSessionLogf(g_colorWarn, "[MonoHook] %s skipped: return type is not bool.\n", d.full_name.c_str());
+                    continue;
+                }
+                int totalArgs = (mi.isStatic ? 0 : 1) + mi.managedParamCount;
+                det = GetMonoDetourForTotalArgs(totalArgs, (int)i);
+                if (!det) {
+                    LizardSessionLogf(g_colorWarn, "[MonoHook] %s skipped: unsupported arg shape (total native args=%d).\n", d.full_name.c_str(), totalArgs);
+                    continue;
+                }
+                methodAddr = mi.address;
+                LizardSessionLogf(g_colorOffset, "[MonoHook] %s -> addr=0x%p static=%s managedParams=%d totalArgs=%d\n",
+                    d.full_name.c_str(), (void*)methodAddr, mi.isStatic ? "true" : "false", mi.managedParamCount, totalArgs);
+            } else {
+                methodAddr = ResolveMethodAddressByRuntime(
+                    g_runtimeMode,
+                    d.namespaze.c_str(), d.class_name.c_str(), d.method_name.c_str(), d.param_count);
+                LizardSessionLogf(methodAddr == 0 ? g_colorError : g_colorOffset, "[Resolver] %s -> 0x%p\n", d.full_name.c_str(), (void*)methodAddr);
+                det = GetDetourForSignature(d.signature, (int)i);
+            }
+
+            CreateHookWithResolvedOffset(d.full_name.c_str(), methodAddr, det, &g_hook_originals[(int)i]);
         }
 
         MH_EnableHook(MH_ALL_HOOKS);

@@ -3,6 +3,6 @@
 
 #include "framework.h"
 #include "lizard_log.h"
-#include "il2cpp_resolver.h"
+#include "runtime_resolver.h"
 
 #endif

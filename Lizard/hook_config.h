@@ -48,3 +48,4 @@ void SplitIl2CppFullName(const std::string& full_name, std::string& namespaze, s
 HookSignature InferSignatureFromParamList(const std::string& params_inside_parens);
 
 void* GetDetourForSignature(HookSignature sig, int slot);
+void* GetMonoDetourForTotalArgs(int totalArgs, int slot);
