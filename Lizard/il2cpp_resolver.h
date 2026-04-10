@@ -675,7 +675,10 @@ static void ResolveMetadataIl2CppTypesTable(
         }
     }
 
-    const int minWant = (typeDefCount / 48) > 6 ? (typeDefCount / 48) : 6;
+    // Previously (typeDefCount/48) was too strict on large games — the table was rejected
+    // and every return type became "?" in the Explorer. Slightly looser bar still
+    // filters random header offsets but accepts more real metadata blobs.
+    const int minWant = (std::max)(5, typeDefCount / 80);
     if (bestScore >= minWant && bestOff != 0) {
         outTableOff = bestOff;
         outNumTypes = numTypes;

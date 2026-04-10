@@ -71,6 +71,22 @@ static std::string UnescapeCString(const std::string& in) {
     return o;
 }
 
+static std::string EscapeCString(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
+
 static int CountDWORDPointers(const std::string& p) {
     int n = 0;
     for (size_t pos = 0; pos < p.size();) {
@@ -92,6 +108,17 @@ static int DefaultParamCountFromSignature(HookSignature sig) {
     case HookSignature::BoolThis4: return 2;
     case HookSignature::BoolThis5: return 3;
     default: return 0;
+    }
+}
+
+static const char* SignatureParamPrototype(HookSignature sig) {
+    switch (sig) {
+    case HookSignature::BoolMethod: return "DWORD* method";
+    case HookSignature::BoolThisMethod: return "DWORD* __this, DWORD* method";
+    case HookSignature::BoolThisScenes: return "DWORD* __this, DWORD* scenes, DWORD* method";
+    case HookSignature::BoolThis4: return "DWORD* __this, DWORD* a2, DWORD* a3, DWORD* method";
+    case HookSignature::BoolThis5: return "DWORD* __this, DWORD* a2, DWORD* a3, DWORD* a4, DWORD* method";
+    default: return "DWORD* __this, DWORD* method";
     }
 }
 
@@ -235,5 +262,49 @@ bool LoadGameHookDefinitions(std::vector<HookDefinition>& out_defs, std::wstring
     if (!ReadWholeFile(out_config_path, utf8)) return false;
     SkipUtf8Bom(utf8);
     ParseHookDefinitionsFromText(utf8, out_defs);
+    return true;
+}
+
+bool SaveGameHookDefinitions(const std::vector<HookDefinition>& defs, const std::wstring& config_path) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, config_path.c_str(), L"wb") != 0 || !f) return false;
+
+    static const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+    if (fwrite(bom, 1, sizeof(bom), f) != sizeof(bom)) {
+        fclose(f);
+        return false;
+    }
+
+    for (const HookDefinition& d : defs) {
+        std::string line;
+        line.reserve(256);
+        line += d.full_name;
+        line += "(";
+        line += SignatureParamPrototype(d.signature);
+        line += ") {\n";
+        line += "    name \"";
+        line += EscapeCString(d.display_name.empty() ? d.full_name : d.display_name);
+        line += "\";\n";
+        line += "    enabled ";
+        line += d.enabled_on_start ? "true;\n" : "false;\n";
+        line += "    param_count ";
+        line += std::to_string(d.param_count);
+        line += ";\n";
+        line += "    return ";
+        line += d.return_bool ? "true;\n" : "false;\n";
+        if (!d.log_line.empty()) {
+            line += "    printf(\"";
+            line += EscapeCString(d.log_line);
+            line += "\");\n";
+        }
+        line += "}\n\n";
+
+        if (fwrite(line.data(), 1, line.size(), f) != line.size()) {
+            fclose(f);
+            return false;
+        }
+    }
+
+    fclose(f);
     return true;
 }

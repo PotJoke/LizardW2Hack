@@ -41,6 +41,7 @@ extern void* g_hook_originals[kMaxHookSlots];
 // Default file name: LizardHooks.txt in the same folder as the .exe.
 // Override full path with env var LIZARD_HOOKS_FILE (wide path).
 bool LoadGameHookDefinitions(std::vector<HookDefinition>& out_defs, std::wstring& out_config_path);
+bool SaveGameHookDefinitions(const std::vector<HookDefinition>& defs, const std::wstring& config_path);
 
 void SplitIl2CppFullName(const std::string& full_name, std::string& namespaze, std::string& class_name, std::string& method_name);
 
